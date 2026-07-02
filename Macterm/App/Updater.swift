@@ -46,10 +46,16 @@ final class Updater {
         // updater fails to start and its app-modal alert blocks the run
         // loop at launch — on CI nobody can click OK.
         let startUpdater: Bool = {
+            // In debug builds Sparkle can't verify the unsigned dev binary against
+            // the production EdDSA key, so it pops an "Unable to Check For
+            // Updates" dialog on every launch. Don't auto-start in that case.
             #if DEBUG
             return false
             #else
-            return !BenchmarkControl.isEnabled
+            // Release builds: honor the user's persisted preference. When they've
+            // disabled auto-updates, prevent the initial Sparkle check that would
+            // produce the error dialog.
+            return !BenchmarkControl.isEnabled && Preferences.shared.autoUpdatesEnabled
             #endif
         }()
 

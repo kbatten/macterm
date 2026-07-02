@@ -174,6 +174,15 @@ final class Preferences {
         "command",
     ]
 
+    // MARK: - Updates
+
+    /// Whether auto-updates are enabled. Persists the user's choice in
+    /// Settings so that `Updater` can respect it at launch time before any
+    /// settings UI has been rendered. Defaults to on for existing users.
+    var autoUpdatesEnabled: Bool {
+        didSet { defaults.set(autoUpdatesEnabled, forKey: Keys.autoUpdatesEnabled) }
+    }
+
     // MARK: - Window
 
     /// Macterm-painted window background opacity (0–1). Independent from
@@ -339,6 +348,7 @@ final class Preferences {
         terminateSessionsOnQuit = defaults.object(forKey: Keys.terminateSessionsOnQuit) as? Bool ?? false
         tabSwitcherVisibility = (defaults.string(forKey: Keys.tabSwitcherVisibility))
             .flatMap(TabSwitcherVisibility.init(rawValue:)) ?? .whenMultiple
+        autoUpdatesEnabled = defaults.object(forKey: Keys.autoUpdatesEnabled) as? Bool ?? true
         Self.runOneTimeMigrations(defaults: defaults)
     }
 
@@ -394,6 +404,7 @@ final class Preferences {
         static let showNewProjectButton = "macterm.sidebar.showNewProjectButton"
         static let terminateSessionsOnQuit = "macterm.session.terminateOnQuit"
         static let tabSwitcherVisibility = "macterm.toolbar.tabSwitcherVisibility"
+        static let autoUpdatesEnabled = "macterm.autoUpdatesEnabled"
         static let migrationV2GhosttyConfigOwned = "macterm.migration.v2_ghostty_config_owned"
     }
 }
