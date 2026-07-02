@@ -605,7 +605,7 @@ private struct UpdatesSettings: View {
     @ObservedObject
     private var updater: Updater = .shared
     @State
-    private var automaticallyChecks: Bool = Updater.shared.automaticallyChecksForUpdates
+    private var automaticallyChecks: Bool = Preferences.shared.autoUpdatesEnabled
     @State
     private var automaticallyDownloads: Bool = Updater.shared.automaticallyDownloadsUpdates
 
@@ -614,6 +614,7 @@ private struct UpdatesSettings: View {
             Section("Automatic Updates") {
                 Toggle("Check for updates automatically", isOn: $automaticallyChecks)
                     .onChange(of: automaticallyChecks) { _, v in
+                        Preferences.shared.autoUpdatesEnabled = v
                         updater.automaticallyChecksForUpdates = v
                     }
 

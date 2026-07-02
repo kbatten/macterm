@@ -34,10 +34,16 @@ final class Updater: ObservableObject {
         // Updates" dialog on every launch. Start the controller without
         // kicking off update checks; release builds still auto-check.
         let startUpdater: Bool = {
+            // In debug builds Sparkle can't verify the unsigned dev binary against
+            // the production EdDSA key, so it pops an "Unable to Check For
+            // Updates" dialog on every launch. Don't auto-start in that case.
             #if DEBUG
             return false
             #else
-            return true
+            // Release builds: honor the user's persisted preference. When they've
+            // disabled auto-updates, prevent the initial Sparkle check that would
+            // produce the error dialog.
+            return Preferences.shared.autoUpdatesEnabled
             #endif
         }()
         let updaterDelegate = updaterDelegate
