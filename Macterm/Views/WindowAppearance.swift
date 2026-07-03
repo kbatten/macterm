@@ -271,23 +271,35 @@ enum WindowAppearance {
     /// titlebar. Follows Ghostty's `updateGlassEffectIfNeeded` pattern.
     private static func syncGlass(window: NSWindow, backgroundColor: NSColor, opacity: Double) {
         guard #available(macOS 26.0, *) else { return }
-        guard let contentView = window.contentView, let themeFrame = contentView.superview else { return }
+        let themeFrame = themeFrame(for: window)
+        guard let contentView = window.contentView, let themeFrame else { return }
 
+        let isPanel = themeFrame === contentView
         let glass = existingGlass(in: window) ?? {
-            let view = MactermGlassView(topOffset: -contentView.safeAreaInsets.top)
-            // Below the content view so SwiftUI (sidebar, terminal, toolbar)
-            // composites on top of the glass.
-            themeFrame.addSubview(view, positioned: .below, relativeTo: contentView)
-            NSLayoutConstraint.activate([
-                view.topAnchor.constraint(equalTo: themeFrame.topAnchor),
-                view.leadingAnchor.constraint(equalTo: themeFrame.leadingAnchor),
-                view.bottomAnchor.constraint(equalTo: themeFrame.bottomAnchor),
-                view.trailingAnchor.constraint(equalTo: themeFrame.trailingAnchor),
-            ])
+            let view = MactermGlassView(topOffset: isPanel ? 0 : -contentView.safeAreaInsets.top)
+            if isPanel {
+                contentView.addSubview(view)
+                NSLayoutConstraint.activate([
+                    view.topAnchor.constraint(equalTo: contentView.topAnchor),
+                    view.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+                    view.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+                    view.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+                ])
+            } else {
+                // Below the content view so SwiftUI (sidebar, terminal, toolbar)
+                // composites on top of the glass.
+                themeFrame.addSubview(view, positioned: .below, relativeTo: contentView)
+                NSLayoutConstraint.activate([
+                    view.topAnchor.constraint(equalTo: themeFrame.topAnchor),
+                    view.leadingAnchor.constraint(equalTo: themeFrame.leadingAnchor),
+                    view.bottomAnchor.constraint(equalTo: themeFrame.bottomAnchor),
+                    view.trailingAnchor.constraint(equalTo: themeFrame.trailingAnchor),
+                ])
+            }
             return view
         }()
 
-        glass.updateTopInset(-contentView.safeAreaInsets.top)
+        glass.updateTopInset(isPanel ? 0 : -contentView.safeAreaInsets.top)
         glass.configure(
             style: officialGlassStyle(Preferences.shared.windowGlassStyle),
             backgroundColor: backgroundColor,
@@ -312,10 +324,28 @@ enum WindowAppearance {
         }
     }
 
+    /// The superview to use for glass positioning: the content view's own
+    /// superview (themeFrame) when it exists (regular windows), or the
+    /// content view itself for panels where the hosting fills the content.
+    private static func themeFrame(for window: NSWindow) -> NSView? {
+        window.contentView?.superview ?? window.contentView
+    }
+
     @available(macOS 26.0, *)
     private static func existingGlass(in window: NSWindow) -> MactermGlassView? {
-        guard let themeFrame = window.contentView?.superview else { return nil }
-        return themeFrame.subviews.compactMap { $0 as? MactermGlassView }.first
+        // Regular windows: glass is below the content view's superview.
+        if let themeFrame = themeFrame(for: window), themeFrame !== window.contentView {
+            if let found = themeFrame.subviews.compactMap({ $0 as? MactermGlassView }).first {
+                return found
+            }
+        }
+        // Panels: glass is a direct subview of the content view.
+        if let contentView = window.contentView,
+           let found = contentView.subviews.compactMap({ $0 as? MactermGlassView }).first
+        {
+            return found
+        }
+        return nil
     }
 
     /// The window's private corner radius, so the glass clips to the same

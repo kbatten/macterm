@@ -72,6 +72,9 @@ final class QuickTerminalService: NSObject {
     private func reapplyBlur() {
         guard let panel, isVisible else { return }
         setWindowBackgroundBlur(panel, radius: Preferences.shared.windowBlurRadius)
+        if #available(macOS 26.0, *) {
+            WindowAppearance.sync(window: panel)
+        }
     }
 
     @objc
@@ -216,6 +219,9 @@ final class QuickTerminalService: NSObject {
         hosting.autoresizingMask = [.width, .height]
         panel.contentView?.addSubview(hosting)
         hostingView = hosting
+
+        // Apply liquid glass when enabled, matching the main window's appearance.
+        WindowAppearance.sync(window: panel)
 
         // Capture the currently-frontmost app *before* showing so we can put
         // focus back on it when the panel hides. The `.nonactivatingPanel`
