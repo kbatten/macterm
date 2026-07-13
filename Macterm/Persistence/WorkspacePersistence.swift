@@ -42,7 +42,7 @@ private func ensureHistfileExists(for paneID: UUID, inProjectPath projectPath: S
 /// workspace persistence (e.g. QuickTerminal). All panes within one project
 /// share the same histfile so their command histories merge across sessions.
 @MainActor
-internal func quickTerminalHistfileURL() -> String? {
+func quickTerminalHistfileURL() -> String? {
     guard let dir = histfileDirectory() else { return nil }
     let fileName = "qt.zsh"
     let url = dir.appendingPathComponent(fileName, isDirectory: false)
@@ -307,11 +307,11 @@ enum WorkspaceSerializer {
     private static func restoreNode(_ snap: SplitNodeSnapshot, projectID: UUID, histfileFor: [UUID: String]) -> SplitNode {
         switch snap {
         case let .pane(p):
-            var env: [String: String]? = nil
+            var env: [String: String] = [:]
             if let historyURL = histfileFor[p.id] {
-                env = ["HISTFILE": historyURL]
+                env["HISTFILE"] = historyURL
             }
-            let pane = Pane(projectPath: p.projectPath, projectID: projectID, command: nil, shell: nil, env: env)
+            let pane = Pane(projectPath: p.projectPath, projectID: projectID, command: nil, shell: nil, env: env.isEmpty ? nil : env)
             if p.needsAttention == true {
                 pane.restoreNeedsAttention()
             }
