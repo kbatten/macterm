@@ -249,7 +249,8 @@ final class Pane: Identifiable {
     /// ghostty config / login shell at surface-creation time.
     let shell: String?
     /// Extra environment variables for the spawned shell. nil/empty → none.
-    let env: [String: String]?
+    /// Mutable so callers (e.g. QuickTerminal) can inject additional vars like HISTFILE after init.
+    var env: [String: String]?
     /// The basename of the pane's live foreground process — a running command
     /// (`hx`, `btop`), or the pane's shell when idle at a prompt (so a nested
     /// `zsh` launched inside `nu` shows `zsh`). nil only before the surface

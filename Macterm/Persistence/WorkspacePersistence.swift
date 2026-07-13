@@ -3,6 +3,56 @@ import os
 
 private let logger = Logger(subsystem: appBundleID, category: "WorkspacePersistence")
 
+// MARK: - Histfile storage helpers
+
+/// Directory in App Support where per-pane HISTFILEs are stored.
+private let histfilesDirectoryName = "macterm/history"
+
+@MainActor
+private func histfileDirectory() -> URL? {
+    let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+    return appSupport?.appendingPathComponent(histfilesDirectoryName, isDirectory: true)
+}
+
+/// Derives a deterministic HISTFILE URL for a pane given its snapshot ID and project path.
+@MainActor
+private func deriveHistfileURL(for paneID: UUID, inProjectPath projectPath: String) -> URL? {
+    guard let dir = histfileDirectory() else { return nil }
+    // Use the snapshot pane ID to create a unique filename that survives restarts.
+    let fileName = "pane_\(paneID.uuidString).zsh"
+    return dir.appendingPathComponent(fileName, isDirectory: false)
+}
+
+/// Ensures a histfile exists at the derived URL (creates empty file if not).
+@MainActor
+private func ensureHistfileExists(for paneID: UUID, inProjectPath projectPath: String) -> URL? {
+    let url = deriveHistfileURL(for: paneID, inProjectPath: projectPath)
+    guard let url else { return nil }
+    if !FileManager.default.fileExists(atPath: url.path) {
+        try? Data().write(to: url, options: .atomic)
+    }
+    try? FileManager.default.createDirectory(
+        at: histfileDirectory() ?? URL(fileURLWithPath: "/dev/null"),
+        withIntermediateDirectories: true
+    )
+    return url
+}
+
+/// Derives a project-level HISTFILE URL for panes that don't go through
+/// workspace persistence (e.g. QuickTerminal). All panes within one project
+/// share the same histfile so their command histories merge across sessions.
+@MainActor
+internal func quickTerminalHistfileURL() -> String? {
+    guard let dir = histfileDirectory() else { return nil }
+    let fileName = "qt.zsh"
+    let url = dir.appendingPathComponent(fileName, isDirectory: false)
+    // Ensure the file exists so shells have somewhere to write.
+    if !FileManager.default.fileExists(atPath: url.path) {
+        try? Data().write(to: url, options: .atomic)
+    }
+    return url.absoluteString
+}
+
 // MARK: - File envelope
 
 /// Current schema version. Bump when the snapshot types change shape.
@@ -70,6 +120,9 @@ struct PaneSnapshot: Codable {
     /// outlive the shell process, and `.idle` is the default. Optional so older
     /// snapshots (without the field) decode as nil / idle.
     var needsAttention: Bool?
+    /// HISTFILE path for restoring shell command history across restarts.
+    /// Stored as a plain string so JSON encoding is explicit and predictable.
+    var historyFileURL: String?
     // No `title`: the tab name is derived live from the pane's foreground
     // process, so there's nothing per-pane to persist. (An older snapshot's
     // `title` key is harmlessly ignored on decode.)
@@ -179,7 +232,7 @@ enum WorkspaceSerializer {
                         id: tab.id,
                         customTitle: tab.customTitle,
                         focusedPaneID: tab.focusedPaneID,
-                        splitRoot: snapshotNode(tab.splitRoot)
+                        splitRoot: snapshotNode(tab.splitRoot, tabID: tab.id)
                     )
                 }
             )
@@ -187,10 +240,18 @@ enum WorkspaceSerializer {
     }
 
     static func restore(from snapshots: [WorkspaceSnapshot], validIDs: Set<UUID>) -> [Workspace] {
-        snapshots.compactMap { snap in
+        // Collect histfile mappings from all panes in the snapshot so we can
+        // inject them into restored panes below. The UUIDs survive across restarts.
+        var histfileFor: [UUID: String] = [:]
+        for snap in snapshots where validIDs.contains(snap.projectID) {
+            for tab in snap.tabs {
+                collectHistfiles(in: tab.splitRoot, projectID: snap.projectID, into: &histfileFor)
+            }
+        }
+        return snapshots.compactMap { snap in
             guard validIDs.contains(snap.projectID) else { return nil }
             let tabs = snap.tabs.map { t in
-                let root = restoreNode(t.splitRoot, projectID: snap.projectID)
+                let root = restoreNode(t.splitRoot, projectID: snap.projectID, histfileFor: histfileFor)
                 let focused = t.focusedPaneID.flatMap { root.findPane(id: $0)?.id } ?? root.allPanes().first?.id
                 return TerminalTab(id: t.id, splitRoot: root, focusedPaneID: focused, customTitle: t.customTitle)
             }
@@ -199,7 +260,20 @@ enum WorkspaceSerializer {
         }
     }
 
-    static func snapshotNode(_ node: SplitNode) -> SplitNodeSnapshot {
+    /// Collect histfile URLs from the snapshot tree for later injection into restored panes.
+    private static func collectHistfiles(in node: SplitNodeSnapshot, projectID: UUID, into map: inout [UUID: String]) {
+        switch node {
+        case let .pane(p):
+            if let url = p.historyFileURL, !url.isEmpty {
+                map[p.id] = url
+            }
+        case let .split(b):
+            collectHistfiles(in: b.first, projectID: projectID, into: &map)
+            collectHistfiles(in: b.second, projectID: projectID, into: &map)
+        }
+    }
+
+    static func snapshotNode(_ node: SplitNode, tabID: UUID) -> SplitNodeSnapshot {
         switch node {
         case let .pane(p):
             // Prefer the shell's live cwd over the pane's original project
@@ -208,25 +282,36 @@ enum WorkspaceSerializer {
             // surface hasn't reported a pwd yet.
             let path = p.nsView?.currentPwd ?? p.projectPath
             let needsAttention = p.executionState == .done
+            // Derive and store a per-pane HISTFILE URL so command history
+            // survives across app restarts. The snapshot pane ID anchors the
+            // filename; if the user splits/merges panes between sessions, the
+            // same histfile stays on disk — harmless orphaning is acceptable.
+            _ = ensureHistfileExists(for: p.id, inProjectPath: path)
+            let historyFileURL = deriveHistfileURL(for: p.id, inProjectPath: path)?.absoluteString
             return .pane(PaneSnapshot(
                 id: p.id,
                 projectPath: path,
-                needsAttention: needsAttention
+                needsAttention: needsAttention,
+                historyFileURL: historyFileURL
             ))
         case let .split(b):
             return .split(SplitBranchSnapshot(
                 direction: b.direction,
                 ratio: Double(b.ratio),
-                first: snapshotNode(b.first),
-                second: snapshotNode(b.second)
+                first: snapshotNode(b.first, tabID: tabID),
+                second: snapshotNode(b.second, tabID: tabID)
             ))
         }
     }
 
-    private static func restoreNode(_ snap: SplitNodeSnapshot, projectID: UUID) -> SplitNode {
+    private static func restoreNode(_ snap: SplitNodeSnapshot, projectID: UUID, histfileFor: [UUID: String]) -> SplitNode {
         switch snap {
         case let .pane(p):
-            let pane = Pane(projectPath: p.projectPath, projectID: projectID)
+            var env: [String: String]? = nil
+            if let historyURL = histfileFor[p.id] {
+                env = ["HISTFILE": historyURL]
+            }
+            let pane = Pane(projectPath: p.projectPath, projectID: projectID, command: nil, shell: nil, env: env)
             if p.needsAttention == true {
                 pane.restoreNeedsAttention()
             }
@@ -235,8 +320,8 @@ enum WorkspaceSerializer {
             return .split(SplitBranch(
                 direction: b.direction,
                 ratio: CGFloat(b.ratio),
-                first: restoreNode(b.first, projectID: projectID),
-                second: restoreNode(b.second, projectID: projectID)
+                first: restoreNode(b.first, projectID: projectID, histfileFor: histfileFor),
+                second: restoreNode(b.second, projectID: projectID, histfileFor: histfileFor)
             ))
         }
     }

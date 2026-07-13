@@ -302,8 +302,19 @@ final class QuickTerminalSplitState {
         set { tab.focusedPaneID = newValue }
     }
 
+    /// Re-inject HISTFILE into all panes — used after any mutation that could create new panes.
+    private func injectHistfile() {
+        guard let histfileURL = quickTerminalHistfileURL() else { return }
+        for pane in tab.splitRoot.allPanes() {
+            var env = pane.env ?? [:]
+            if !env.keys.contains("HISTFILE") { env["HISTFILE"] = histfileURL }
+            pane.env = env
+        }
+    }
+
     init() {
         tab = TerminalTab(projectPath: NSHomeDirectory(), projectID: QuickTerminalService.ephemeralProjectID)
+        injectHistfile()
     }
 
     func focusPane(_ paneID: UUID) {
@@ -359,10 +370,12 @@ final class QuickTerminalSplitState {
 
     func split(paneID: UUID, direction: SplitDirection) {
         tab.split(paneID: paneID, direction: direction)
+        injectHistfile()
     }
 
     func autoSplit(paneID: UUID) {
         tab.autoSplit(paneID: paneID)
+        injectHistfile()
     }
 
     func resize(_ direction: PaneFocusDirection, delta: CGFloat = 0.03) {
@@ -376,6 +389,7 @@ final class QuickTerminalSplitState {
             // always have at least one pane, but we fully reset so the prior
             // pane's surface is torn down (removePane already destroyed it).
             tab = TerminalTab(projectPath: NSHomeDirectory(), projectID: QuickTerminalService.ephemeralProjectID)
+            injectHistfile()
         case .removed,
              .notFound:
             break
