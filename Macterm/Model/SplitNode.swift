@@ -421,7 +421,7 @@ final class Pane: Identifiable {
 
     func ensureNSView() -> GhosttyTerminalNSView {
         if let existing = _nsView { return existing }
-        let view = GhosttyTerminalNSView(workingDirectory: projectPath, command: command, shell: shell, env: env)
+        let view = GhosttyTerminalNSView(workingDirectory: projectPath, command: command, shell: shell, env: env, paneID: id)
         _nsView = view
         return view
     }

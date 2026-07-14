@@ -21,6 +21,8 @@ final class GhosttyTerminalNSView: NSView {
     private let shell: String?
     /// Extra environment variables for the spawned shell.
     private let env: [String: String]?
+    /// The pane's UUID, used to derive the histfile directory for ZDOTDIR isolation.
+    private let paneID: UUID?
 
     /// Heap buffers backing the `const char*` fields of the surface config —
     /// notably `initial_input`, which libghostty writes to the pty
@@ -115,11 +117,12 @@ final class GhosttyTerminalNSView: NSView {
     private var keyTextAccumulator: [String] = []
     private var currentKeyEvent: NSEvent?
 
-    init(workingDirectory: String, command: String? = nil, shell: String? = nil, env: [String: String]? = nil) {
+    init(workingDirectory: String, command: String? = nil, shell: String? = nil, env: [String: String]? = nil, paneID: UUID? = nil) {
         self.workingDirectory = workingDirectory
         self.command = command
         self.shell = shell
         self.env = env
+        self.paneID = paneID
         super.init(frame: .zero)
         setupTrackingArea()
         registerForDraggedTypes(Array(Self.dropTypes))
@@ -195,6 +198,21 @@ final class GhosttyTerminalNSView: NSView {
         if let env, !env.isEmpty {
             for (key, value) in env {
                 envVars.append(ghostty_env_var_s(key: cString(key), value: cString(value)))
+            }
+        }
+
+        // For zsh shells, set ZDOTDIR to the pane's histfile directory so that
+        // .zshenv loads from there before any user dot files can override HISTFILE.
+        // This provides per-pane history isolation across all panes.
+        if let shellPath = shell ?? GhosttyApp.shared.configuredShell {
+            let baseName = (shellPath as NSString).lastPathComponent
+            if baseName == "zsh" || baseName.hasSuffix("/zsh") {
+                if let paneID, let zdotdir = deriveHistfileDirURL(for: paneID, inProjectPath: workingDirectory)?.absoluteString {
+                    envVars.append(ghostty_env_var_s(
+                        key: cString("ZDOTDIR"),
+                        value: cString(zdotdir)
+                    ))
+                }
             }
         }
 

@@ -308,6 +308,12 @@ final class QuickTerminalSplitState {
         for pane in tab.splitRoot.allPanes() {
             var env = pane.env ?? [:]
             if !env.keys.contains("HISTFILE") { env["HISTFILE"] = histfileURL }
+            // For zsh shells, also set ZDOTDIR to our histfile directory so that
+            // .zshenv loads before any user dot files can override HISTFILE.
+            let shellName = GhosttyApp.shared.configuredShell.map { ($0 as NSString).lastPathComponent }
+            if shellName == "zsh", let zdotdir = quickTerminalHistfileDirURL() {
+                if !env.keys.contains("ZDOTDIR") { env["ZDOTDIR"] = zdotdir }
+            }
             pane.env = env
         }
     }

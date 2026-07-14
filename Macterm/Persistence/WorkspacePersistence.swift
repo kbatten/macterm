@@ -23,7 +23,17 @@ private func deriveHistfileURL(for paneID: UUID, inProjectPath projectPath: Stri
     return dir.appendingPathComponent(fileName, isDirectory: false)
 }
 
-/// Ensures a histfile exists at the derived URL (creates empty file if not).
+/// Derives a pane-specific histfile directory URL for ZDOTDIR isolation on zsh shells.
+@MainActor
+func deriveHistfileDirURL(for paneID: UUID, inProjectPath projectPath: String) -> URL? {
+    guard let dir = histfileDirectory() else { return nil }
+    let sub = dir.appendingPathComponent("pane_\(paneID.uuidString)", isDirectory: true)
+    try? FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+    return sub
+}
+
+/// Ensures a histfile exists at the derived URL and creates a .ghostty-init file
+/// in the pane's histfile directory for ZDOTDIR-based HISTFILE isolation.
 @MainActor
 private func ensureHistfileExists(for paneID: UUID, inProjectPath projectPath: String) -> URL? {
     let url = deriveHistfileURL(for: paneID, inProjectPath: projectPath)
@@ -35,6 +45,21 @@ private func ensureHistfileExists(for paneID: UUID, inProjectPath projectPath: S
         at: histfileDirectory() ?? URL(fileURLWithPath: "/dev/null"),
         withIntermediateDirectories: true
     )
+
+    // Create the pane-specific histfile directory with .ghostty-init for ZDOTDIR isolation.
+    // When ZDOTDIR points here, .zshenv loads .ghostty-init before any user dot files.
+    let dirURL = deriveHistfileDirURL(for: paneID, inProjectPath: projectPath)
+    if let dirURL {
+        let ghosttyInit = dirURL.appendingPathComponent(".ghostty-init", isDirectory: false)
+        if !FileManager.default.fileExists(atPath: ghosttyInit.path) {
+            // Export HISTFILE unconditionally — it can't be overridden by user dot files
+            // because .zshenv loads before them when ZDOTDIR points here.
+            let histfile = deriveHistfileURL(for: paneID, inProjectPath: projectPath)?.absoluteString
+            let content = "export HISTFILE=\(histfile ?? "")\n"
+            try? content.write(to: ghosttyInit, atomically: true, encoding: .utf8)
+        }
+    }
+
     return url
 }
 
@@ -51,6 +76,22 @@ func quickTerminalHistfileURL() -> String? {
         try? Data().write(to: url, options: .atomic)
     }
     return url.absoluteString
+}
+
+/// Derives a project-level HISTFILE directory URL for ZDOTDIR isolation on
+/// QuickTerminal panes. All panes within one project share the same zsh history
+/// and dot file isolation directory.
+@MainActor
+func quickTerminalHistfileDirURL() -> String? {
+    guard let dir = histfileDirectory() else { return nil }
+    let sub = dir.appendingPathComponent("qt", isDirectory: true)
+    try? FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+    let ghosttyInit = sub.appendingPathComponent(".ghostty-init", isDirectory: false)
+    if !FileManager.default.fileExists(atPath: ghosttyInit.path) {
+        guard let histfilePath = quickTerminalHistfileURL() else { return nil }
+        try? "export HISTFILE=\(histfilePath)\n".write(to: ghosttyInit, atomically: true, encoding: .utf8)
+    }
+    return sub.absoluteString
 }
 
 // MARK: - File envelope
