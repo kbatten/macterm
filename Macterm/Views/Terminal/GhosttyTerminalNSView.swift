@@ -207,7 +207,7 @@ final class GhosttyTerminalNSView: NSView {
         if let shellPath = shell ?? GhosttyApp.shared.configuredShell {
             let baseName = (shellPath as NSString).lastPathComponent
             if baseName == "zsh" || baseName.hasSuffix("/zsh") {
-                if let paneID, let zdotdir = deriveHistfileDirURL(for: paneID, inProjectPath: workingDirectory)?.absoluteString {
+                if let paneID, let zdotdir = deriveHistfileDirURL(for: paneID, inProjectPath: workingDirectory)?.path {
                     envVars.append(ghostty_env_var_s(
                         key: cString("ZDOTDIR"),
                         value: cString(zdotdir)

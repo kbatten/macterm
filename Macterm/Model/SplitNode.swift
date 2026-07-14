@@ -569,21 +569,21 @@ final class Pane: Identifiable {
         let dirURL = histfileDirURL
         guard let dirURL else { return }
         let zshenv = dirURL.appendingPathComponent(".zshenv", isDirectory: false)
-        if !FileManager.default.fileExists(atPath: zshenv.path) {
-            // Keep ZDOTDIR permanently at our histfile-dir (never unset — that's what caused the bug).
-            // /etc/zshrc's `HISTFILE=${ZDOTDIR:-$HOME}/.zsh_history` will always default to us.
-            let content = """
-            # This directory IS zsh's config root for this pane (keep ZDOTDIR permanently).
-            export HISTFILE=\(url.absoluteString)
+        // Always (re)write — the content is deterministic from the pane's histfile path, so
+        // overwriting is idempotent and auto-heals any stale file from an older format.
+        // Keep ZDOTDIR permanently at our histfile-dir (never unset — that's what caused the bug).
+        // /etc/zshrc's `HISTFILE=${ZDOTDIR:-$HOME}/.zsh_history` will always default to us.
+        let content = """
+        # This directory IS zsh's config root for this pane (keep ZDOTDIR permanently).
+        export HISTFILE=\(url.path)
 
-            # Source user's ~/.zshenv so ghostty integration and user configs still load.
-            if [[ -f "$HOME/.zshenv" ]]; then
-                builtin source -- "$HOME/.zshenv" 2>/dev/null || true
-            fi
+        # Source user's ~/.zshenv so ghostty integration and user configs still load.
+        if [[ -f "$HOME/.zshenv" ]]; then
+            builtin source -- "$HOME/.zshenv" 2>/dev/null || true
+        fi
 
-            """
-            try? content.write(to: zshenv, atomically: true, encoding: .utf8)
-        }
+        """
+        try? content.write(to: zshenv, atomically: true, encoding: .utf8)
     }
 }
 

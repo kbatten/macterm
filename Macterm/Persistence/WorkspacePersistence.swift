@@ -48,7 +48,7 @@ func ensureHistfileDirExists(for paneID: UUID, inProjectPath projectPath: String
 
     let dirURL = deriveHistfileDirURL(for: paneID, inProjectPath: projectPath)
     if let dirURL {
-        ensureZshenvIn(histfileDir: url.absoluteString, at: dirURL)
+        ensureZshenvIn(histfileDir: url.path, at: dirURL)
     }
 
     return url
@@ -73,7 +73,7 @@ private func ensureHistfileExists(for paneID: UUID, inProjectPath projectPath: S
     // ${ZDOTDIR:-$HOME} defaults to our dir instead of the user's home.
     let dirURL = deriveHistfileDirURL(for: paneID, inProjectPath: projectPath)
     if let dirURL {
-        ensureZshenvIn(histfileDir: url.absoluteString, at: dirURL)
+        ensureZshenvIn(histfileDir: url.path, at: dirURL)
     }
 
     return url
@@ -86,22 +86,22 @@ private func ensureHistfileExists(for paneID: UUID, inProjectPath projectPath: S
 @MainActor
 private func ensureZshenvIn(histfileDir: String, at dirURL: URL) {
     let zshenv = dirURL.appendingPathComponent(".zshenv", isDirectory: false)
-    if !FileManager.default.fileExists(atPath: zshenv.path) {
-        // Keep ZDOTDIR permanently here (never unset — that's what broke the previous approach).
-        // /etc/zshrc's `HISTFILE=${ZDOTDIR:-$HOME}/.zsh_history` will now default to
-        // our dir instead of ~ because ZDOTDIR is always set to us.
-        let content = """
-        # This directory IS zsh's config root for this pane (keep ZDOTDIR permanently).
-        export HISTFILE=\(histfileDir)
+    // Always (re)write — the content is deterministic from histfileDir, so overwriting
+    // is idempotent and auto-heals any stale file from an older format.
+    // Keep ZDOTDIR permanently here (never unset — that's what broke the previous approach).
+    // /etc/zshrc's `HISTFILE=${ZDOTDIR:-$HOME}/.zsh_history` will now default to
+    // our dir instead of ~ because ZDOTDIR is always set to us.
+    let content = """
+    # This directory IS zsh's config root for this pane (keep ZDOTDIR permanently).
+    export HISTFILE=\(histfileDir)
 
-        # Source user's ~/.zshenv so ghostty integration and user configs still load.
-        if [[ -f "$HOME/.zshenv" ]]; then
-            builtin source -- "$HOME/.zshenv" 2>/dev/null || true
-        fi
+    # Source user's ~/.zshenv so ghostty integration and user configs still load.
+    if [[ -f "$HOME/.zshenv" ]]; then
+        builtin source -- "$HOME/.zshenv" 2>/dev/null || true
+    fi
 
-        """
-        try? content.write(to: zshenv, atomically: true, encoding: .utf8)
-    }
+    """
+    try? content.write(to: zshenv, atomically: true, encoding: .utf8)
 }
 
 /// Derives a project-level HISTFILE URL for panes that don't go through
@@ -116,7 +116,7 @@ func quickTerminalHistfileURL() -> String? {
     if !FileManager.default.fileExists(atPath: url.path) {
         try? Data().write(to: url, options: .atomic)
     }
-    return url.absoluteString
+    return url.path
 }
 
 /// Derives a project-level HISTFILE directory URL for ZDOTDIR isolation on
@@ -131,7 +131,7 @@ func quickTerminalHistfileDirURL() -> String? {
     if let histfilePath = quickTerminalHistfileURL() {
         ensureZshenvIn(histfileDir: histfilePath, at: sub)
     }
-    return sub.absoluteString
+    return sub.path
 }
 
 // MARK: - File envelope
@@ -368,7 +368,7 @@ enum WorkspaceSerializer {
             // filename; if the user splits/merges panes between sessions, the
             // same histfile stays on disk — harmless orphaning is acceptable.
             _ = ensureHistfileExists(for: p.id, inProjectPath: path)
-            let historyFileURL = deriveHistfileURL(for: p.id, inProjectPath: path)?.absoluteString
+            let historyFileURL = deriveHistfileURL(for: p.id, inProjectPath: path)?.path
             return .pane(PaneSnapshot(
                 id: p.id,
                 projectPath: path,
@@ -389,14 +389,18 @@ enum WorkspaceSerializer {
         switch snap {
         case let .pane(p):
             var env: [String: String] = [:]
-            if let historyURL = histfileFor[p.id] {
-                env["HISTFILE"] = historyURL
-                // Restore the ZDOTDIR pointing to this pane's histfile dir so /etc/zshrc's
-                // ${ZDOTDIR:-$HOME}/.zsh_history defaults here, NOT to ~. Pane.id gets a
-                // fresh random UUID on restore — it doesn't match p.id (the snapshot ID),
-                // so GhosttyTerminalNSView would derive from the wrong path. Set it here
-                // using the snapshot ID that was actually saved in workspaces_v3.json.
-                if let zdotdir = deriveHistfileDirURL(for: p.id, inProjectPath: p.projectPath)?.absoluteString {
+            // Re-derive HISTFILE and ZDOTDIR fresh from the snapshot ID rather than trusting
+            // the stored `historyFileURL` string (older snapshots stored a `file://` URL that
+            // zsh can't use as a path). Pane.id gets a fresh random UUID on restore — it doesn't
+            // match p.id (the snapshot ID) — so we key both off p.id, which is what the histfile
+            // directories on disk were created under.
+            if histfileFor[p.id] != nil {
+                if let histfile = deriveHistfileURL(for: p.id, inProjectPath: p.projectPath)?.path {
+                    env["HISTFILE"] = histfile
+                }
+                // Keep ZDOTDIR permanently at this pane's histfile dir so /etc/zshrc's
+                // ${ZDOTDIR:-$HOME}/.zsh_history defaults here, NOT to ~.
+                if let zdotdir = deriveHistfileDirURL(for: p.id, inProjectPath: p.projectPath)?.path {
                     env["ZDOTDIR"] = zdotdir
                 }
             }
