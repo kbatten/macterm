@@ -557,6 +557,9 @@ final class Pane: Identifiable {
 
     /// Creates the pane's histfile directory and `.zshenv` if they don't already exist.
     /// This must run BEFORE the shell starts so zsh can source .zshenv first (before /etc/zshrc).
+    /// Keep ZDOTDIR permanently pointing here — never unset it, or /etc/zshrc's
+    /// ${ZDOTDIR:-$HOME}/.zsh_history defaults to ~ again. Source ~/.zshenv so
+    /// ghostty integration and user configs still load.
     private func ensurePaneHistfileDir() {
         guard let url = histfilePath else { return }
         if !FileManager.default.fileExists(atPath: url.path) {
@@ -567,13 +570,15 @@ final class Pane: Identifiable {
         guard let dirURL else { return }
         let zshenv = dirURL.appendingPathComponent(".zshenv", isDirectory: false)
         if !FileManager.default.fileExists(atPath: zshenv.path) {
-            // Export HISTFILE unconditionally — loaded by zsh's .zshenv BEFORE any /etc/zshrc or user dot files.
+            // Keep ZDOTDIR permanently at our histfile-dir (never unset — that's what caused the bug).
+            // /etc/zshrc's `HISTFILE=${ZDOTDIR:-$HOME}/.zsh_history` will always default to us.
             let content = """
+            # This directory IS zsh's config root for this pane (keep ZDOTDIR permanently).
             export HISTFILE=\(url.absoluteString)
-            if [[ -n "$GHOSTTY_ZSH_ZDOTDIR" ]]; then
-                export ZDOTDIR="$GHOSTTY_ZSH_ZDOTDIR"
-            else
-                unset ZDOTDIR
+
+            # Source user's ~/.zshenv so ghostty integration and user configs still load.
+            if [[ -f "$HOME/.zshenv" ]]; then
+                builtin source -- "$HOME/.zshenv" 2>/dev/null || true
             fi
 
             """
