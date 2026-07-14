@@ -32,8 +32,44 @@ func deriveHistfileDirURL(for paneID: UUID, inProjectPath projectPath: String) -
     return sub
 }
 
-/// Ensures a histfile exists at the derived URL and creates a .ghostty-init file
-/// in the pane's histfile directory for ZDOTDIR-based HISTFILE isolation.
+/// Creates a pane-specific histfile directory and `.zshenv` eagerly (e.g. at pane spawn time).
+/// This ensures .zshenv exists BEFORE the shell starts so zsh can source it and set HISTFILE.
+@MainActor
+func ensureHistfileDirExists(for paneID: UUID, inProjectPath projectPath: String) -> URL? {
+    let url = deriveHistfileURL(for: paneID, inProjectPath: projectPath)
+    guard let url else { return nil }
+    if !FileManager.default.fileExists(atPath: url.path) {
+        try? Data().write(to: url, options: .atomic)
+    }
+    try? FileManager.default.createDirectory(
+        at: histfileDirectory() ?? URL(fileURLWithPath: "/dev/null"),
+        withIntermediateDirectories: true
+    )
+
+    let dirURL = deriveHistfileDirURL(for: paneID, inProjectPath: projectPath)
+    if let dirURL {
+        let zshenv = dirURL.appendingPathComponent(".zshenv", isDirectory: false)
+        if !FileManager.default.fileExists(atPath: zshenv.path) {
+            let content = """
+            # Early init: export HISTFILE before /etc/zshrc or user dot files run.
+            export HISTFILE=\(url.absoluteString)
+            # Restore ZDOTDIR for ghostty shell integration and user dot files.
+            if [[ -n "$GHOSTTY_ZSH_ZDOTDIR" ]]; then
+                export ZDOTDIR="$GHOSTTY_ZSH_ZDOTDIR"
+            else
+                unset ZDOTDIR
+            fi
+
+            """
+            try? content.write(to: zshenv, atomically: true, encoding: .utf8)
+        }
+    }
+
+    return url
+}
+
+/// Ensures a pane-specific histfile directory exists with a proper `.zshenv` that exports HISTFILE.
+/// This .zshenv loads BEFORE any user dot files (including /etc/zshrc), so HISTFILE can't be overridden.
 @MainActor
 private func ensureHistfileExists(for paneID: UUID, inProjectPath projectPath: String) -> URL? {
     let url = deriveHistfileURL(for: paneID, inProjectPath: projectPath)
@@ -46,17 +82,28 @@ private func ensureHistfileExists(for paneID: UUID, inProjectPath projectPath: S
         withIntermediateDirectories: true
     )
 
-    // Create the pane-specific histfile directory with .ghostty-init for ZDOTDIR isolation.
-    // When ZDOTDIR points here, .zshenv loads .ghostty-init before any user dot files.
+    // Create the pane-specific histfile directory with a .zshenv for ZDOTDIR isolation.
+    // When ghostty spawns zsh with ZDOTDIR pointing here, this .zshenv loads FIRST —
+    // before /etc/zshrc or user dot files — so HISTFILE is set unconditionally.
     let dirURL = deriveHistfileDirURL(for: paneID, inProjectPath: projectPath)
     if let dirURL {
-        let ghosttyInit = dirURL.appendingPathComponent(".ghostty-init", isDirectory: false)
-        if !FileManager.default.fileExists(atPath: ghosttyInit.path) {
-            // Export HISTFILE unconditionally — it can't be overridden by user dot files
-            // because .zshenv loads before them when ZDOTDIR points here.
-            let histfile = deriveHistfileURL(for: paneID, inProjectPath: projectPath)?.absoluteString
-            let content = "export HISTFILE=\(histfile ?? "")\n"
-            try? content.write(to: ghosttyInit, atomically: true, encoding: .utf8)
+        let zshenv = dirURL.appendingPathComponent(".zshenv", isDirectory: false)
+        if !FileManager.default.fileExists(atPath: zshenv.path) {
+            // Export HISTFILE unconditionally before any /etc/zshrc or user dot files can override it.
+            // Then restore ZDOTDIR to ~ so ghostty's shell integration and user dot files load correctly.
+            let histfile = url.absoluteString
+            let content = """
+            # Early init: export HISTFILE before /etc/zshrc or user dot files run.
+            export HISTFILE=\(histfile)
+            # Restore ZDOTDIR for ghostty shell integration and user dot files.
+            if [[ -n "$GHOSTTY_ZSH_ZDOTDIR" ]]; then
+                export ZDOTDIR="$GHOSTTY_ZSH_ZDOTDIR"
+            else
+                unset ZDOTDIR
+            fi
+
+            """
+            try? content.write(to: zshenv, atomically: true, encoding: .utf8)
         }
     }
 
@@ -80,16 +127,28 @@ func quickTerminalHistfileURL() -> String? {
 
 /// Derives a project-level HISTFILE directory URL for ZDOTDIR isolation on
 /// QuickTerminal panes. All panes within one project share the same zsh history
-/// and dot file isolation directory.
+/// and dot file isolation directory. Creates .zshenv that exports HISTFILE before
+/// any /etc/zshrc or user dot files can override it.
 @MainActor
 func quickTerminalHistfileDirURL() -> String? {
     guard let dir = histfileDirectory() else { return nil }
     let sub = dir.appendingPathComponent("qt", isDirectory: true)
     try? FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
-    let ghosttyInit = sub.appendingPathComponent(".ghostty-init", isDirectory: false)
-    if !FileManager.default.fileExists(atPath: ghosttyInit.path) {
+    let zshenv = sub.appendingPathComponent(".zshenv", isDirectory: false)
+    if !FileManager.default.fileExists(atPath: zshenv.path) {
         guard let histfilePath = quickTerminalHistfileURL() else { return nil }
-        try? "export HISTFILE=\(histfilePath)\n".write(to: ghosttyInit, atomically: true, encoding: .utf8)
+        let content = """
+        # Early init: export HISTFILE before /etc/zshrc or user dot files run.
+        export HISTFILE=\(histfilePath)
+        # Restore ZDOTDIR for ghostty shell integration and user dot files.
+        if [[ -n "$GHOSTTY_ZSH_ZDOTDIR" ]]; then
+            export ZDOTDIR="$GHOSTTY_ZSH_ZDOTDIR"
+        else
+            unset ZDOTDIR
+        fi
+
+        """
+        try? content.write(to: zshenv, atomically: true, encoding: .utf8)
     }
     return sub.absoluteString
 }
@@ -352,6 +411,10 @@ enum WorkspaceSerializer {
             if let historyURL = histfileFor[p.id] {
                 env["HISTFILE"] = historyURL
             }
+            // Ensure the histfile directory with .zshenv exists BEFORE the pane's surface
+            // spawns the shell. zsh will source this .zshenv when ZDOTDIR is set, which
+            // means HISTFILE is already set before /etc/zshrc can override it.
+            _ = ensureHistfileDirExists(for: p.id, inProjectPath: p.projectPath)
             let pane = Pane(projectPath: p.projectPath, projectID: projectID, command: nil, shell: nil, env: env.isEmpty ? nil : env)
             if p.needsAttention == true {
                 pane.restoreNeedsAttention()

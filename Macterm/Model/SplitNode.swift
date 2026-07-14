@@ -421,6 +421,10 @@ final class Pane: Identifiable {
 
     func ensureNSView() -> GhosttyTerminalNSView {
         if let existing = _nsView { return existing }
+        // Ensure the histfile directory with .zshenv exists before the surface spawns.
+        // This provides per-pane HISTFILE isolation for zsh shells by setting ZDOTDIR
+        // so our .zshenv is loaded first, before /etc/zshrc can override HISTFILE.
+        ensurePaneHistfileDir()
         let view = GhosttyTerminalNSView(workingDirectory: projectPath, command: command, shell: shell, env: env, paneID: id)
         _nsView = view
         return view
@@ -532,6 +536,49 @@ final class Pane: Identifiable {
         self.shell = shell
         self.env = env
         executionTracker = TerminalExecutionTracker(hasUserInteraction: command != nil)
+    }
+
+    /// Derives the pane-specific histfile directory URL for ZDOTDIR isolation on zsh.
+    private var histfileDirURL: URL? {
+        guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
+        let dir = appSupport.appendingPathComponent("macterm/history", isDirectory: true)
+        let sub = dir.appendingPathComponent("pane_\(id.uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return sub
+    }
+
+    /// Derives the pane-specific histfile file URL.
+    private var histfilePath: URL? {
+        guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
+        let dir = appSupport.appendingPathComponent("macterm/history", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("pane_\(id.uuidString).zsh", isDirectory: false)
+    }
+
+    /// Creates the pane's histfile directory and `.zshenv` if they don't already exist.
+    /// This must run BEFORE the shell starts so zsh can source .zshenv first (before /etc/zshrc).
+    private func ensurePaneHistfileDir() {
+        guard let url = histfilePath else { return }
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try? Data().write(to: url, options: .atomic)
+        }
+
+        let dirURL = histfileDirURL
+        guard let dirURL else { return }
+        let zshenv = dirURL.appendingPathComponent(".zshenv", isDirectory: false)
+        if !FileManager.default.fileExists(atPath: zshenv.path) {
+            // Export HISTFILE unconditionally — loaded by zsh's .zshenv BEFORE any /etc/zshrc or user dot files.
+            let content = """
+            export HISTFILE=\(url.absoluteString)
+            if [[ -n "$GHOSTTY_ZSH_ZDOTDIR" ]]; then
+                export ZDOTDIR="$GHOSTTY_ZSH_ZDOTDIR"
+            else
+                unset ZDOTDIR
+            fi
+
+            """
+            try? content.write(to: zshenv, atomically: true, encoding: .utf8)
+        }
     }
 }
 
