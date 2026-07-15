@@ -309,8 +309,12 @@ final class QuickTerminalSplitState {
             var env = pane.env ?? [:]
             if !env.keys.contains("HISTFILE") { env["HISTFILE"] = histfileURL }
             // For zsh shells, also set ZDOTDIR to our histfile directory so that
-            // .zshenv loads before any user dot files can override HISTFILE.
-            let shellName = GhosttyApp.shared.configuredShell.map { ($0 as NSString).lastPathComponent }
+            // .zshenv loads before any user dot files can override HISTFILE. The
+            // shell is the ghostty config's `command`, else the user's *login*
+            // shell — a fresh quick-terminal pane names none, so without the
+            // login-shell fallback the default-zsh case would never be isolated.
+            let shellPath = GhosttyApp.shared.configuredShell ?? GhosttyTerminalNSView.loginShellPath
+            let shellName = (shellPath as NSString).lastPathComponent
             if shellName == "zsh", let zdotdir = quickTerminalHistfileDirURL() {
                 if !env.keys.contains("ZDOTDIR") { env["ZDOTDIR"] = zdotdir }
             }
