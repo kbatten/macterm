@@ -539,7 +539,7 @@ final class Pane: Identifiable {
     }
 
     /// Derives the pane-specific histfile directory URL for ZDOTDIR isolation on zsh.
-    private var histfileDirURL: URL? {
+    private var histfileDirPath: URL? {
         guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
         let dir = appSupport.appendingPathComponent("macterm/history", isDirectory: true)
         let sub = dir.appendingPathComponent("pane_\(id.uuidString)", isDirectory: true)
@@ -549,10 +549,7 @@ final class Pane: Identifiable {
 
     /// Derives the pane-specific histfile file URL.
     private var histfilePath: URL? {
-        guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
-        let dir = appSupport.appendingPathComponent("macterm/history", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("pane_\(id.uuidString).zsh", isDirectory: false)
+        histfileDirPath?.appendingPathComponent(".zsh_history", isDirectory: false)
     }
 
     /// Creates the pane's histfile directory and `.zshenv` if they don't already exist.
@@ -566,7 +563,7 @@ final class Pane: Identifiable {
             try? Data().write(to: url, options: .atomic)
         }
 
-        let dirURL = histfileDirURL
+        let dirURL = histfileDirPath
         guard let dirURL else { return }
         let zshenv = dirURL.appendingPathComponent(".zshenv", isDirectory: false)
         // Always (re)write — the content is deterministic from the pane's histfile path, so
@@ -575,7 +572,7 @@ final class Pane: Identifiable {
         // /etc/zshrc's `HISTFILE=${ZDOTDIR:-$HOME}/.zsh_history` will always default to us.
         let content = """
         # This directory IS zsh's config root for this pane (keep ZDOTDIR permanently).
-        export HISTFILE=\(url.path)
+        export HISTFILE="\(url.path)"
 
         # Source user's ~/.zshenv so ghostty integration and user configs still load.
         if [[ -f "$HOME/.zshenv" ]]; then

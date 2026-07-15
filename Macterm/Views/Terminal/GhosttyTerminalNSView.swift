@@ -143,6 +143,19 @@ final class GhosttyTerminalNSView: NSView {
     /// from a stray updateNSView during SwiftUI teardown).
     private var isDestroyed = false
 
+    private func deriveHistfileDirPath(for paneID: UUID) -> URL? {
+        guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
+        let dir = appSupport.appendingPathComponent("macterm/history", isDirectory: true)
+        let sub = dir.appendingPathComponent("pane_\(paneID.uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return sub
+    }
+
+    /// Derives a deterministic HISTFILE URL for a pane given its snapshot ID and project path.
+    private func deriveHistfilePath(for paneID: UUID) -> URL? {
+        deriveHistfileDirPath(for: paneID)?.appendingPathComponent(".zsh_history", isDirectory: false)
+    }
+
     func createSurface() {
         guard !isDestroyed else { return }
         guard surface == nil, let app = GhosttyApp.shared.app else { return }
@@ -207,7 +220,7 @@ final class GhosttyTerminalNSView: NSView {
         if let shellPath = shell ?? GhosttyApp.shared.configuredShell {
             let baseName = (shellPath as NSString).lastPathComponent
             if baseName == "zsh" || baseName.hasSuffix("/zsh") {
-                if let paneID, let zdotdir = deriveHistfileDirURL(for: paneID, inProjectPath: workingDirectory)?.path {
+                if let paneID, let zdotdir = deriveHistfileDirPath(for: paneID)?.path {
                     envVars.append(ghostty_env_var_s(
                         key: cString("ZDOTDIR"),
                         value: cString(zdotdir)
