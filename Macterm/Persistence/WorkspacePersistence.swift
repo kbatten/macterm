@@ -86,9 +86,9 @@ private func ensureZshenvIn(histfileDir: String, at dirURL: URL) {
     # This directory IS zsh's config root for this pane (keep ZDOTDIR permanently).
     export HISTFILE="\(histfileDir)"
 
-    # Source user's ~/.zshenv so ghostty integration and user configs still load.
-    if [[ -f "$HOME/.zshenv" ]]; then
-        builtin source -- "$HOME/.zshenv" 2>/dev/null || true
+    # Source user's ~/.zshrc so ghostty integration and user configs still load.
+    if [[ -f "$HOME/.zshrc" ]]; then
+        builtin source -- "$HOME/.zshrc" 2>/dev/null || true
     fi
 
     """
