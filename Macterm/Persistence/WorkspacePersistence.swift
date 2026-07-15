@@ -339,18 +339,19 @@ enum WorkspaceSerializer {
     }
 
     static func restore(from snapshots: [WorkspaceSnapshot], validIDs: Set<UUID>) -> [Workspace] {
-        // Collect histfile mappings from all panes in the snapshot so we can
-        // inject them into restored panes below. The UUIDs survive across restarts.
-        var histfileFor: [UUID: String] = [:]
+        // Collect the snapshot IDs of panes that recorded a history file. A restored
+        // pane reuses its snapshot ID as its stable `histfileID` only when it had one,
+        // so panes from older/foreign snapshots without history don't claim a dir.
+        var panesWithHistfile: Set<UUID> = []
         for snap in snapshots where validIDs.contains(snap.projectID) {
             for tab in snap.tabs {
-                collectHistfiles(in: tab.splitRoot, projectID: snap.projectID, into: &histfileFor)
+                collectHistfilePanes(in: tab.splitRoot, into: &panesWithHistfile)
             }
         }
         return snapshots.compactMap { snap in
             guard validIDs.contains(snap.projectID) else { return nil }
             let tabs = snap.tabs.map { t in
-                let root = restoreNode(t.splitRoot, projectID: snap.projectID, histfileFor: histfileFor)
+                let root = restoreNode(t.splitRoot, projectID: snap.projectID, panesWithHistfile: panesWithHistfile)
                 let focused = t.focusedPaneID.flatMap { root.findPane(id: $0)?.id } ?? root.allPanes().first?.id
                 return TerminalTab(id: t.id, splitRoot: root, focusedPaneID: focused, customTitle: t.customTitle)
             }
@@ -359,16 +360,16 @@ enum WorkspaceSerializer {
         }
     }
 
-    /// Collect histfile URLs from the snapshot tree for later injection into restored panes.
-    private static func collectHistfiles(in node: SplitNodeSnapshot, projectID: UUID, into map: inout [UUID: String]) {
+    /// Collect the IDs of snapshot panes that recorded an on-disk history file.
+    private static func collectHistfilePanes(in node: SplitNodeSnapshot, into set: inout Set<UUID>) {
         switch node {
         case let .pane(p):
             if let url = p.historyFileURL, !url.isEmpty {
-                map[p.id] = url
+                set.insert(p.id)
             }
         case let .split(b):
-            collectHistfiles(in: b.first, projectID: projectID, into: &map)
-            collectHistfiles(in: b.second, projectID: projectID, into: &map)
+            collectHistfilePanes(in: b.first, into: &set)
+            collectHistfilePanes(in: b.second, into: &set)
         }
     }
 
@@ -381,14 +382,13 @@ enum WorkspaceSerializer {
             // surface hasn't reported a pwd yet.
             let path = p.nsView?.currentPwd ?? p.projectPath
             let needsAttention = p.executionState == .done
-            // Derive and store a per-pane HISTFILE URL so command history
-            // survives across app restarts. The snapshot pane ID anchors the
-            // filename; if the user splits/merges panes between sessions, the
-            // same histfile stays on disk — harmless orphaning is acceptable.
-            _ = ensureHistfileExists(for: p.id)
-            let historyFileURL = deriveHistfilePath(for: p.id)?.path
+            // Persist the pane's stable `histfileID` (not the volatile `id`) so the
+            // restored pane reuses the same on-disk history directory. Restore feeds
+            // `PaneSnapshot.id` back in as the new pane's `histfileID`.
+            _ = ensureHistfileExists(for: p.histfileID)
+            let historyFileURL = deriveHistfilePath(for: p.histfileID)?.path
             return .pane(PaneSnapshot(
-                id: p.id,
+                id: p.histfileID,
                 projectPath: path,
                 needsAttention: needsAttention,
                 historyFileURL: historyFileURL
@@ -403,30 +403,22 @@ enum WorkspaceSerializer {
         }
     }
 
-    private static func restoreNode(_ snap: SplitNodeSnapshot, projectID: UUID, histfileFor: [UUID: String]) -> SplitNode {
+    private static func restoreNode(_ snap: SplitNodeSnapshot, projectID: UUID, panesWithHistfile: Set<UUID>) -> SplitNode {
         switch snap {
         case let .pane(p):
-            var env: [String: String] = [:]
-            // Re-derive HISTFILE and ZDOTDIR fresh from the snapshot ID rather than trusting
-            // the stored `historyFileURL` string (older snapshots stored a `file://` URL that
-            // zsh can't use as a path). Pane.id gets a fresh random UUID on restore — it doesn't
-            // match p.id (the snapshot ID) — so we key both off p.id, which is what the histfile
-            // directories on disk were created under.
-            if histfileFor[p.id] != nil {
-                if let histfile = deriveHistfilePath(for: p.id)?.path {
-                    env["HISTFILE"] = histfile
-                }
-                // Keep ZDOTDIR permanently at this pane's histfile dir so /etc/zshrc's
-                // ${ZDOTDIR:-$HOME}/.zsh_history defaults here, NOT to ~.
-                if let zdotdir = deriveHistfileDirPath(for: p.id)?.path {
-                    env["ZDOTDIR"] = zdotdir
-                }
-            }
-            // Ensure the histfile directory with .zshenv exists BEFORE the pane's surface
-            // spawns the shell. zsh will source this .zshenv when ZDOTDIR is set, which
-            // means HISTFILE is already set before /etc/zshrc can override it.
-            _ = ensureHistfileDirExists(for: p.id)
-            let pane = Pane(projectPath: p.projectPath, projectID: projectID, command: nil, shell: nil, env: env.isEmpty ? nil : env)
+            // Carry the snapshot ID forward as the pane's stable `histfileID` when
+            // the snapshot recorded a history file, so the restored pane reuses its
+            // existing history directory instead of spawning a fresh empty one.
+            // `Pane.ensureNSView` derives HISTFILE/ZDOTDIR from `histfileID` and
+            // creates the .zshenv, so nothing needs injecting into `env` here.
+            let pane = Pane(
+                projectPath: p.projectPath,
+                projectID: projectID,
+                command: nil,
+                shell: nil,
+                env: nil,
+                histfileID: panesWithHistfile.contains(p.id) ? p.id : UUID()
+            )
             if p.needsAttention == true {
                 pane.restoreNeedsAttention()
             }
@@ -435,8 +427,8 @@ enum WorkspaceSerializer {
             return .split(SplitBranch(
                 direction: b.direction,
                 ratio: CGFloat(b.ratio),
-                first: restoreNode(b.first, projectID: projectID, histfileFor: histfileFor),
-                second: restoreNode(b.second, projectID: projectID, histfileFor: histfileFor)
+                first: restoreNode(b.first, projectID: projectID, panesWithHistfile: panesWithHistfile),
+                second: restoreNode(b.second, projectID: projectID, panesWithHistfile: panesWithHistfile)
             ))
         }
     }

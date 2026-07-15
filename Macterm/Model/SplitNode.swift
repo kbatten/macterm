@@ -237,6 +237,12 @@ struct TerminalExecutionTracker {
 @MainActor @Observable
 final class Pane: Identifiable {
     let id = UUID()
+    /// Stable identity for the pane's on-disk history file, persisted in the
+    /// workspace snapshot and reused across restarts. Distinct from `id`, which
+    /// is a fresh UUID every launch (surfaces/views are rebuilt on restore) —
+    /// keying the histfile off `id` would orphan a new empty history dir on
+    /// every relaunch. Defaults to a fresh UUID for interactively-created panes.
+    let histfileID: UUID
     let projectPath: String
     let projectID: UUID
     /// Process the pane launches on first surface creation, injected into the
@@ -426,8 +432,9 @@ final class Pane: Identifiable {
         // so our .zshenv is loaded first, before /etc/zshrc can override HISTFILE.
         // Shared with the persistence/restore path so the .zshenv format stays in
         // one place (it also re-loads ghostty's shell integration — see zshenvContent).
-        _ = ensureHistfileDirExists(for: id)
-        let view = GhosttyTerminalNSView(workingDirectory: projectPath, command: command, shell: shell, env: env, paneID: id)
+        // Keyed off `histfileID` (stable across restarts), not `id` (fresh each launch).
+        _ = ensureHistfileDirExists(for: histfileID)
+        let view = GhosttyTerminalNSView(workingDirectory: projectPath, command: command, shell: shell, env: env, paneID: histfileID)
         _nsView = view
         return view
     }
@@ -530,13 +537,15 @@ final class Pane: Identifiable {
         projectID: UUID,
         command: String? = nil,
         shell: String? = nil,
-        env: [String: String]? = nil
+        env: [String: String]? = nil,
+        histfileID: UUID = UUID()
     ) {
         self.projectPath = projectPath
         self.projectID = projectID
         self.command = command
         self.shell = shell
         self.env = env
+        self.histfileID = histfileID
         executionTracker = TerminalExecutionTracker(hasUserInteraction: command != nil)
     }
 }

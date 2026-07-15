@@ -69,6 +69,33 @@ struct WorkspaceSerializerTests {
     }
 
     @Test
+    func round_trip_preserves_histfile_id_so_history_dir_is_reused() {
+        // The pane's transient `id` is regenerated on restore, but `histfileID`
+        // must survive so the restored pane reuses its on-disk history directory
+        // instead of orphaning a fresh empty one on every relaunch.
+        let ws = Workspace(projectID: UUID(), projectPath: "/tmp")
+        guard case let .pane(original) = ws.tabs[0].splitRoot else {
+            Issue.record("expected leaf")
+            return
+        }
+        let originalHistfileID = original.histfileID
+
+        let roundTripped = roundTrip([ws.projectID: ws])
+        guard case let .pane(restored) = roundTripped[0].tabs[0].splitRoot else {
+            Issue.record("expected leaf")
+            return
+        }
+        #expect(restored.histfileID == originalHistfileID)
+        // And a second round-trip is stable (no drift across repeated restarts).
+        let twice = roundTrip([roundTripped[0].projectID: roundTripped[0]])
+        guard case let .pane(restoredAgain) = twice[0].tabs[0].splitRoot else {
+            Issue.record("expected leaf")
+            return
+        }
+        #expect(restoredAgain.histfileID == originalHistfileID)
+    }
+
+    @Test
     func round_trip_preserves_active_tab_when_valid() {
         let ws = Workspace(projectID: UUID(), projectPath: "/tmp")
         let second = ws.createTab(projectPath: "/tmp")
