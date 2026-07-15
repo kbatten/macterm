@@ -249,6 +249,19 @@ final class QuickTerminalService: NSObject {
         FocusRestoration.restoreFocus(to: paneID, in: splitState.splitRoot, window: panel)
     }
 
+    /// Persist the quick terminal's scrollback (keyed on the shared sentinel) so
+    /// the next launch replays it. Reads the focused pane's live surface, falling
+    /// back to any pane. Called on app termination while surfaces are still alive.
+    func saveScrollback() {
+        guard Preferences.shared.restoreScrollback else { return }
+        let panes = splitState.splitRoot.allPanes()
+        let focused = splitState.focusedPaneID.flatMap { id in panes.first { $0.id == id } }
+        guard let pane = focused ?? panes.first,
+              let text = pane.nsView?.readScrollback(maxLines: Preferences.shared.scrollbackRestoreLines)
+        else { return }
+        writeScrollbackFile(text, for: quickTerminalPaneID)
+    }
+
     private func hide() {
         panel?.orderOut(nil)
         hostingView?.removeFromSuperview()
@@ -319,6 +332,10 @@ final class QuickTerminalSplitState {
                 if !env.keys.contains("ZDOTDIR") { env["ZDOTDIR"] = zdotdir }
             }
             pane.env = env
+            // Share one merged scrollback across all quick-terminal panes and
+            // sessions, mirroring the shared history file above. Set before the
+            // surface spawns so createSurface restores from the sentinel file.
+            pane.scrollbackRestoreID = quickTerminalPaneID
         }
     }
 

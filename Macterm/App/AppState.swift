@@ -194,6 +194,29 @@ final class AppState {
         workspaceStore.save(WorkspaceSerializer.snapshot(workspaces))
     }
 
+    // MARK: - Scrollback
+
+    /// Persist a live pane's scrollback (keyed on its stable `histfileID`) so a
+    /// reopened pane can replay recent context. No-op when the feature is off or
+    /// the surface has no content. Read from the live surface before it dies.
+    func saveScrollback(for pane: Pane) {
+        guard Preferences.shared.restoreScrollback,
+              let text = pane.nsView?.readScrollback(maxLines: Preferences.shared.scrollbackRestoreLines)
+        else { return }
+        writeScrollbackFile(text, for: pane.histfileID)
+    }
+
+    /// Save scrollback for every live pane across all workspaces. Called on app
+    /// termination so a relaunch restores each pane's recent context.
+    func saveAllScrollback() {
+        guard Preferences.shared.restoreScrollback else { return }
+        for ws in workspaces.values {
+            for pane in ws.tabs.flatMap({ $0.splitRoot.allPanes() }) {
+                saveScrollback(for: pane)
+            }
+        }
+    }
+
     // MARK: - Project
 
     func selectProject(_ project: Project) {
@@ -301,6 +324,9 @@ final class AppState {
         logger.debug("unloadProject: \(projectID, privacy: .public)")
         let snapshot = WorkspaceSerializer.snapshot([projectID: ws])
         for pane in ws.tabs.flatMap({ $0.splitRoot.allPanes() }) {
+            // Capture live scrollback before the surface dies; the restored pane
+            // (same histfileID) replays it on its next spawn.
+            saveScrollback(for: pane)
             pane.destroySurface()
         }
         if let restored = WorkspaceSerializer.restore(from: snapshot, validIDs: [projectID]).first {
@@ -314,6 +340,7 @@ final class AppState {
         logger.debug("removeProject: \(projectID, privacy: .public)")
         if let ws = workspaces[projectID] {
             for pane in ws.tabs.flatMap({ $0.splitRoot.allPanes() }) {
+                removeScrollbackFile(for: pane.histfileID)
                 pane.destroySurface()
             }
         }
@@ -345,6 +372,8 @@ final class AppState {
         else { return }
         logger.debug("closeTab: \(tabID, privacy: .public) project=\(projectID, privacy: .public)")
         for pane in tab.splitRoot.allPanes() {
+            // Permanently closed — drop any saved scrollback so no orphan lingers.
+            removeScrollbackFile(for: pane.histfileID)
             pane.destroySurface()
         }
         ws.closeTab(tabID)
@@ -504,10 +533,13 @@ final class AppState {
             return
         }
         logger.debug("closePane: \(paneID, privacy: .public) project=\(projectID, privacy: .public)")
+        let closedHistfileID = tab.splitRoot.findPane(id: paneID)?.histfileID
         switch tab.removePane(paneID) {
         case .onlyPaneLeft:
+            // The last pane leaving routes through closeTab, which discards it.
             closeTab(tab.id, projectID: projectID)
         case .removed:
+            if let closedHistfileID { removeScrollbackFile(for: closedHistfileID) }
             saveWorkspaces()
         case .notFound:
             break

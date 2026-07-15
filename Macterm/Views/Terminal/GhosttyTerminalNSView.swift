@@ -238,6 +238,25 @@ final class GhosttyTerminalNSView: NSView {
             }
         }
 
+        // Restore a previous session's scrollback as inert display text above
+        // the fresh prompt. Self-gating: only restored/reloaded panes carry a
+        // histfileID (paneID) with a saved file — fresh interactive panes have
+        // a new id and no file. libghostty processes `initial_output` on the IO
+        // thread before the child's first output, so it deterministically lands
+        // above the prompt. Delete after reading so it isn't replayed again on a
+        // mid-session surface recreation (e.g. QuickTerminal reset); the next
+        // save hook repopulates it from the live buffer.
+        if Preferences.shared.restoreScrollback, let paneID,
+           let saved = readScrollbackFile(for: paneID)
+        {
+            let banner = ScrollbackText.restoredBanner(
+                body: saved,
+                timestamp: ScrollbackText.timestamp(for: Date())
+            )
+            if !banner.isEmpty { config.initial_output = cString(banner) }
+            removeScrollbackFile(for: paneID)
+        }
+
         if envVars.isEmpty {
             surface = ghostty_surface_new(app, &config)
         } else {
@@ -289,6 +308,27 @@ final class GhosttyTerminalNSView: NSView {
         let bytes = UnsafeBufferPointer(start: ptr, count: Int(tty.len)).map { UInt8(bitPattern: $0) }
         guard let name = String(bytes: bytes, encoding: .utf8), !name.isEmpty else { return nil }
         return name
+    }
+
+    /// Reads this surface's full screen + scrollback as plain text (libghostty
+    /// drops styling), returning at most the last `maxLines` lines, or nil when
+    /// there's no surface or no content. Used to persist a pane's scrollback so
+    /// a reopened pane can replay recent context.
+    func readScrollback(maxLines: Int) -> String? {
+        guard let surface, maxLines > 0 else { return nil }
+        // Whole buffer: screen top-left → screen bottom-right (scrollback + active).
+        let selection = ghostty_selection_s(
+            top_left: ghostty_point_s(tag: GHOSTTY_POINT_SCREEN, coord: GHOSTTY_POINT_COORD_TOP_LEFT, x: 0, y: 0),
+            bottom_right: ghostty_point_s(tag: GHOSTTY_POINT_SCREEN, coord: GHOSTTY_POINT_COORD_BOTTOM_RIGHT, x: 0, y: 0),
+            rectangle: false
+        )
+        var text = ghostty_text_s()
+        guard ghostty_surface_read_text(surface, selection, &text) else { return nil }
+        defer { ghostty_surface_free_text(surface, &text) }
+        guard let ptr = text.text, text.text_len > 0 else { return nil }
+        let bytes = UnsafeBufferPointer(start: ptr, count: Int(text.text_len)).map { UInt8(bitPattern: $0) }
+        guard let full = String(bytes: bytes, encoding: .utf8), !full.isEmpty else { return nil }
+        return ScrollbackText.lastLines(full, maxLines: maxLines)
     }
 
     deinit {
