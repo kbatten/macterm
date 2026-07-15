@@ -8,8 +8,10 @@ private let quickTerminalPaneID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 // MARK: - Histfile storage helpers
 
 /// Derives the pane-specific histfile directory URL for ZDOTDIR isolation on zsh.
+/// The single source of truth for histfile paths — `GhosttyTerminalNSView` calls
+/// this too, so the on-disk layout can't drift between the two.
 @MainActor
-private func deriveHistfileDirPath(for paneID: UUID) -> URL? {
+func deriveHistfileDirPath(for paneID: UUID) -> URL? {
     guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
     let dir = appSupport.appendingPathComponent("macterm/history", isDirectory: true)
     let sub = dir.appendingPathComponent("pane_\(paneID.uuidString)", isDirectory: true)
@@ -19,7 +21,7 @@ private func deriveHistfileDirPath(for paneID: UUID) -> URL? {
 
 /// Derives a deterministic HISTFILE URL for a pane given its snapshot ID and project path.
 @MainActor
-private func deriveHistfilePath(for paneID: UUID) -> URL? {
+func deriveHistfilePath(for paneID: UUID) -> URL? {
     deriveHistfileDirPath(for: paneID)?.appendingPathComponent(".zsh_history", isDirectory: false)
 }
 

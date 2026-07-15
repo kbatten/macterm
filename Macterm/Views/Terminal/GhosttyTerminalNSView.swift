@@ -155,19 +155,6 @@ final class GhosttyTerminalNSView: NSView {
             ?? "/bin/zsh"
     }()
 
-    private func deriveHistfileDirPath(for paneID: UUID) -> URL? {
-        guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
-        let dir = appSupport.appendingPathComponent("macterm/history", isDirectory: true)
-        let sub = dir.appendingPathComponent("pane_\(paneID.uuidString)", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return sub
-    }
-
-    /// Derives a deterministic HISTFILE URL for a pane given its snapshot ID and project path.
-    private func deriveHistfilePath(for paneID: UUID) -> URL? {
-        deriveHistfileDirPath(for: paneID)?.appendingPathComponent(".zsh_history", isDirectory: false)
-    }
-
     func createSurface() {
         guard !isDestroyed else { return }
         guard surface == nil, let app = GhosttyApp.shared.app else { return }
