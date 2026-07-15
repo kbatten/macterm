@@ -237,6 +237,12 @@ struct TerminalExecutionTracker {
 @MainActor @Observable
 final class Pane: Identifiable {
     let id = UUID()
+    /// Stable identity for the pane's on-disk history file, persisted in the
+    /// workspace snapshot and reused across restarts. Distinct from `id`, which
+    /// is a fresh UUID every launch (surfaces/views are rebuilt on restore) —
+    /// keying the histfile off `id` would orphan a new empty history dir on
+    /// every relaunch. Defaults to a fresh UUID for interactively-created panes.
+    let histfileID: UUID
     let projectPath: String
     let projectID: UUID
     /// Process the pane launches on first surface creation, injected into the
@@ -249,7 +255,8 @@ final class Pane: Identifiable {
     /// ghostty config / login shell at surface-creation time.
     let shell: String?
     /// Extra environment variables for the spawned shell. nil/empty → none.
-    let env: [String: String]?
+    /// Mutable so callers (e.g. QuickTerminal) can inject additional vars like HISTFILE after init.
+    var env: [String: String]?
     /// The basename of the pane's live foreground process — a running command
     /// (`hx`, `btop`), or the pane's shell when idle at a prompt (so a nested
     /// `zsh` launched inside `nu` shows `zsh`). nil only before the surface
@@ -420,7 +427,14 @@ final class Pane: Identifiable {
 
     func ensureNSView() -> GhosttyTerminalNSView {
         if let existing = _nsView { return existing }
-        let view = GhosttyTerminalNSView(workingDirectory: projectPath, command: command, shell: shell, env: env)
+        // Ensure the histfile directory with .zshenv exists before the surface spawns.
+        // This provides per-pane HISTFILE isolation for zsh shells by setting ZDOTDIR
+        // so our .zshenv is loaded first, before /etc/zshrc can override HISTFILE.
+        // Shared with the persistence/restore path so the .zshenv format stays in
+        // one place (it also re-loads ghostty's shell integration — see zshenvContent).
+        // Keyed off `histfileID` (stable across restarts), not `id` (fresh each launch).
+        _ = ensureHistfileDirExists(for: histfileID)
+        let view = GhosttyTerminalNSView(workingDirectory: projectPath, command: command, shell: shell, env: env, paneID: histfileID)
         _nsView = view
         return view
     }
@@ -523,13 +537,15 @@ final class Pane: Identifiable {
         projectID: UUID,
         command: String? = nil,
         shell: String? = nil,
-        env: [String: String]? = nil
+        env: [String: String]? = nil,
+        histfileID: UUID = UUID()
     ) {
         self.projectPath = projectPath
         self.projectID = projectID
         self.command = command
         self.shell = shell
         self.env = env
+        self.histfileID = histfileID
         executionTracker = TerminalExecutionTracker(hasUserInteraction: command != nil)
     }
 }

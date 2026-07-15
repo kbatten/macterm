@@ -21,6 +21,8 @@ final class GhosttyTerminalNSView: NSView {
     private let shell: String?
     /// Extra environment variables for the spawned shell.
     private let env: [String: String]?
+    /// The pane's UUID, used to derive the histfile directory for ZDOTDIR isolation.
+    private let paneID: UUID?
 
     /// Heap buffers backing the `const char*` fields of the surface config —
     /// notably `initial_input`, which libghostty writes to the pty
@@ -115,11 +117,12 @@ final class GhosttyTerminalNSView: NSView {
     private var keyTextAccumulator: [String] = []
     private var currentKeyEvent: NSEvent?
 
-    init(workingDirectory: String, command: String? = nil, shell: String? = nil, env: [String: String]? = nil) {
+    init(workingDirectory: String, command: String? = nil, shell: String? = nil, env: [String: String]? = nil, paneID: UUID? = nil) {
         self.workingDirectory = workingDirectory
         self.command = command
         self.shell = shell
         self.env = env
+        self.paneID = paneID
         super.init(frame: .zero)
         setupTrackingArea()
         registerForDraggedTypes(Array(Self.dropTypes))
@@ -139,6 +142,18 @@ final class GhosttyTerminalNSView: NSView {
     /// never spontaneously recreate a surface (e.g. from viewDidMoveToWindow or
     /// from a stray updateNSView during SwiftUI teardown).
     private var isDestroyed = false
+
+    /// The user's login shell path (from the password database), the same shell
+    /// libghostty launches when `config.command` is unset. Used to detect zsh so
+    /// a fresh interactive pane — which names no explicit shell — still gets its
+    /// per-pane ZDOTDIR. Mirrors `Pane.defaultShellName`'s resolution; we avoid
+    /// `$SHELL` (the launching process's shell, not the user's login shell).
+    static let loginShellPath: String = {
+        let loginShell = getpwuid(getuid())?.pointee.pw_shell.map { String(cString: $0) }
+        return (loginShell?.isEmpty == false ? loginShell : nil)
+            ?? ProcessInfo.processInfo.environment["SHELL"]
+            ?? "/bin/zsh"
+    }()
 
     func createSurface() {
         guard !isDestroyed else { return }
@@ -195,6 +210,31 @@ final class GhosttyTerminalNSView: NSView {
         if let env, !env.isEmpty {
             for (key, value) in env {
                 envVars.append(ghostty_env_var_s(key: cString(key), value: cString(value)))
+            }
+        }
+
+        // For zsh shells, set ZDOTDIR to the pane's histfile directory so that
+        // .zshenv loads from there before any user dot files can override HISTFILE.
+        // This provides per-pane history isolation across all panes.
+        //
+        // Skip when env already carries ZDOTDIR (restored / QuickTerminal panes
+        // inject it upstream keyed by their *snapshot* ID — re-injecting here with
+        // the pane's fresh runtime ID would point at the wrong, empty directory).
+        //
+        // The shell is `self.shell` (layout `shell:`), else the ghostty config's
+        // `command`, else the user's *login* shell — the same one libghostty
+        // launches when `config.command` is unset. A fresh interactive pane has no
+        // explicit shell, so without the login-shell fallback the guard would miss
+        // every default-zsh pane and never isolate its history.
+        let alreadyHasZdotdir = env?["ZDOTDIR"] != nil
+        if !alreadyHasZdotdir, let paneID {
+            let resolvedShell = shell ?? GhosttyApp.shared.configuredShell ?? Self.loginShellPath
+            let baseName = (resolvedShell as NSString).lastPathComponent
+            if baseName == "zsh", let zdotdir = deriveHistfileDirPath(for: paneID)?.path {
+                envVars.append(ghostty_env_var_s(
+                    key: cString("ZDOTDIR"),
+                    value: cString(zdotdir)
+                ))
             }
         }
 

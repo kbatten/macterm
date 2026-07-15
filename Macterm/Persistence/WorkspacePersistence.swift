@@ -3,6 +3,193 @@ import os
 
 private let logger = Logger(subsystem: appBundleID, category: "WorkspacePersistence")
 
+private let quickTerminalPaneID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+
+// MARK: - Histfile storage helpers
+
+/// Derives the pane-specific histfile directory URL for ZDOTDIR isolation on zsh.
+/// The single source of truth for histfile paths — `GhosttyTerminalNSView` calls
+/// this too, so the on-disk layout can't drift between the two.
+@MainActor
+func deriveHistfileDirPath(for paneID: UUID) -> URL? {
+    guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
+    let dir = appSupport.appendingPathComponent("macterm/history", isDirectory: true)
+    let sub = dir.appendingPathComponent("pane_\(paneID.uuidString)", isDirectory: true)
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    return sub
+}
+
+/// Derives a deterministic HISTFILE URL for a pane given its snapshot ID and project path.
+@MainActor
+func deriveHistfilePath(for paneID: UUID) -> URL? {
+    deriveHistfileDirPath(for: paneID)?.appendingPathComponent(".zsh_history", isDirectory: false)
+}
+
+/// Creates a pane-specific histfile directory and its ZDOTDIR dotfiles eagerly (e.g. at
+/// pane spawn time), so they exist BEFORE the shell starts and zsh can source them.
+@MainActor
+func ensureHistfileDirExists(for paneID: UUID) -> URL? {
+    let url = deriveHistfilePath(for: paneID)
+    guard let url else { return nil }
+    if !FileManager.default.fileExists(atPath: url.path) {
+        try? Data().write(to: url, options: .atomic)
+    }
+    try? FileManager.default.createDirectory(
+        at: deriveHistfileDirPath(for: paneID) ?? URL(fileURLWithPath: "/dev/null"),
+        withIntermediateDirectories: true
+    )
+
+    let dirURL = deriveHistfileDirPath(for: paneID)
+    if let dirURL {
+        ensureZshenvIn(histfilePath: url.path, at: dirURL)
+    }
+
+    return url
+}
+
+/// Ensures a pane-specific histfile directory exists with the ZDOTDIR dotfile mirror.
+/// HISTFILE is reasserted in the generated `.zshrc` (after the user's config and
+/// /etc/zshrc), so the per-pane histfile can't be overridden.
+@MainActor
+private func ensureHistfileExists(for paneID: UUID) -> URL? {
+    let url = deriveHistfilePath(for: paneID)
+    guard let url else { return nil }
+    if !FileManager.default.fileExists(atPath: url.path) {
+        try? Data().write(to: url, options: .atomic)
+    }
+    try? FileManager.default.createDirectory(
+        at: deriveHistfileDirPath(for: paneID) ?? URL(fileURLWithPath: "/dev/null"),
+        withIntermediateDirectories: true
+    )
+
+    // Create the pane-specific histfile directory with its ZDOTDIR dotfile mirror.
+    // Keep ZDOTDIR permanently pointing here (never unset) so /etc/zshrc's
+    // ${ZDOTDIR:-$HOME} defaults to our dir instead of the user's home.
+    let dirURL = deriveHistfileDirPath(for: paneID)
+    if let dirURL {
+        ensureZshenvIn(histfilePath: url.path, at: dirURL)
+    }
+
+    return url
+}
+
+/// Writes the ZDOTDIR dotfile mirror into the given histfile directory for zsh shells.
+/// The key insight: keep ZDOTDIR permanently pointing to this directory (never unset),
+/// so /etc/zshrc's ${ZDOTDIR:-$HOME}/.zsh_history defaults to our dir instead of ~.
+/// Then mirror the user's own dot files phase-by-phase (see `zdotdirFiles`) so their
+/// config loads at its *normal* startup phase, AND re-load ghostty's shell integration,
+/// which our ZDOTDIR override would otherwise suppress.
+@MainActor
+private func ensureZshenvIn(histfilePath: String, at dirURL: URL) {
+    // Always (re)write — the content is deterministic, so overwriting is idempotent
+    // and auto-heals any stale file from an older format.
+    for (name, content) in zdotdirFiles(histfilePath: histfilePath) {
+        let url = dirURL.appendingPathComponent(name, isDirectory: false)
+        try? content.write(to: url, atomically: true, encoding: .utf8)
+    }
+}
+
+/// The dotfiles we drop into a pane's ZDOTDIR — one per zsh startup phase.
+///
+/// Splitting them (rather than cramming everything into `.zshenv`) is what lets the
+/// user's `~/.zshrc` load at its *normal* phase — **after** `/etc/zshrc` — so their
+/// PROMPT/PS1 wins. Sourcing `~/.zshrc` from `.zshenv` (the previous approach) ran it
+/// *before* `/etc/zshrc`, whose `PS1="%n@%m %1~ %# "` then clobbered the user's prompt.
+///
+/// zsh reads, in order: `$ZDOTDIR/.zshenv` → `.zprofile` (login) → `.zshrc`
+/// (interactive) → `.zlogin` (login). Because ZDOTDIR points here for the pane's whole
+/// life, the user's own `~/.z*` files would never be read; each generated file chains
+/// to its `~/` counterpart at the matching phase (absolute path, so no recursion since
+/// ZDOTDIR ≠ $HOME). Errors are not swallowed (only `|| true` guards abort), matching
+/// native zsh — a broken prompt framework should surface, not fail silently.
+///
+/// HISTFILE is set in `.zshenv` (defined for every shell) and re-exported at the end of
+/// `.zshrc` — after `~/.zshrc` and after `/etc/zshrc`'s `${ZDOTDIR:-$HOME}/.zsh_history`
+/// — so the per-pane file is the last writer. ghostty's shell integration is sourced at
+/// the end of `.zshrc` too: our ZDOTDIR override suppresses ghostty's own injection, and
+/// without the OSC 133 markers ghostty believes a command is perpetually running and
+/// pops a spurious "zsh is still running" quit dialog. It defers to the first precmd, so
+/// it wraps whatever prompt `~/.zshrc` ends up with, and needs the user's fpath first.
+private func zdotdirFiles(histfilePath: String) -> [(name: String, content: String)] {
+    [
+        (".zshenv", """
+        # Per-pane HISTFILE isolation; ZDOTDIR points here for this pane's lifetime.
+        export HISTFILE="\(histfilePath)"
+
+        # Chain to the user's real ~/.zshenv at its normal phase.
+        if [[ -f "$HOME/.zshenv" ]]; then
+            builtin source -- "$HOME/.zshenv" || true
+        fi
+
+        """),
+        (".zprofile", """
+        # Chain to the user's real ~/.zprofile at its normal phase (login shells).
+        if [[ -f "$HOME/.zprofile" ]]; then
+            builtin source -- "$HOME/.zprofile" || true
+        fi
+
+        """),
+        (".zshrc", """
+        # Load the user's real interactive config at its normal phase — after
+        # /etc/zshrc — so their PROMPT/PS1, HISTSIZE, etc. are the last writers.
+        if [[ -f "$HOME/.zshrc" ]]; then
+            builtin source -- "$HOME/.zshrc" || true
+        fi
+
+        # Reassert our per-pane HISTFILE last, beating /etc/zshrc's
+        # ${ZDOTDIR:-$HOME}/.zsh_history and any HISTFILE the user set.
+        export HISTFILE="\(histfilePath)"
+
+        # Re-load ghostty's shell integration (OSC 133 prompt markers). Our ZDOTDIR
+        # override suppresses ghostty's own injection; without this the app shows a
+        # spurious "zsh is still running" dialog on quit. Sourced after ~/.zshrc so it
+        # has the user's fpath and wraps the final prompt.
+        if [[ -n "$GHOSTTY_RESOURCES_DIR" \\
+              && -r "$GHOSTTY_RESOURCES_DIR/shell-integration/zsh/ghostty-integration" ]]; then
+            builtin source -- "$GHOSTTY_RESOURCES_DIR/shell-integration/zsh/ghostty-integration"
+        fi
+
+        """),
+        (".zlogin", """
+        # Chain to the user's real ~/.zlogin at its normal phase (login shells).
+        if [[ -f "$HOME/.zlogin" ]]; then
+            builtin source -- "$HOME/.zlogin" || true
+        fi
+
+        """),
+    ]
+}
+
+/// Derives a project-level HISTFILE URL for panes that don't go through
+/// workspace persistence (e.g. QuickTerminal). All panes within one project
+/// share the same histfile so their command histories merge across sessions.
+@MainActor
+func quickTerminalHistfileURL() -> String? {
+    guard let dir = deriveHistfilePath(for: quickTerminalPaneID) else { return nil }
+    let fileName = "qt.zsh"
+    let url = dir.appendingPathComponent(fileName, isDirectory: false)
+    // Ensure the file exists so shells have somewhere to write.
+    if !FileManager.default.fileExists(atPath: url.path) {
+        try? Data().write(to: url, options: .atomic)
+    }
+    return url.path
+}
+
+/// Derives a project-level HISTFILE directory URL for ZDOTDIR isolation on
+/// QuickTerminal panes. All panes within one project share the same zsh history
+/// and dot file isolation directory. Creates .zshenv that exports HISTFILE before
+/// any /etc/zshrc or user dot files can override it.
+@MainActor
+func quickTerminalHistfileDirURL() -> String? {
+    guard let dir = deriveHistfileDirPath(for: quickTerminalPaneID) else { return nil }
+    let sub = dir.appendingPathComponent("qt", isDirectory: true)
+    try? FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+    if let histfilePath = quickTerminalHistfileURL() {
+        ensureZshenvIn(histfilePath: histfilePath, at: sub)
+    }
+    return sub.path
+}
+
 // MARK: - File envelope
 
 /// Current schema version. Bump when the snapshot types change shape.
@@ -70,6 +257,9 @@ struct PaneSnapshot: Codable {
     /// outlive the shell process, and `.idle` is the default. Optional so older
     /// snapshots (without the field) decode as nil / idle.
     var needsAttention: Bool?
+    /// HISTFILE path for restoring shell command history across restarts.
+    /// Stored as a plain string so JSON encoding is explicit and predictable.
+    var historyFileURL: String?
     // No `title`: the tab name is derived live from the pane's foreground
     // process, so there's nothing per-pane to persist. (An older snapshot's
     // `title` key is harmlessly ignored on decode.)
@@ -179,7 +369,7 @@ enum WorkspaceSerializer {
                         id: tab.id,
                         customTitle: tab.customTitle,
                         focusedPaneID: tab.focusedPaneID,
-                        splitRoot: snapshotNode(tab.splitRoot)
+                        splitRoot: snapshotNode(tab.splitRoot, tabID: tab.id)
                     )
                 }
             )
@@ -187,10 +377,19 @@ enum WorkspaceSerializer {
     }
 
     static func restore(from snapshots: [WorkspaceSnapshot], validIDs: Set<UUID>) -> [Workspace] {
-        snapshots.compactMap { snap in
+        // Collect the snapshot IDs of panes that recorded a history file. A restored
+        // pane reuses its snapshot ID as its stable `histfileID` only when it had one,
+        // so panes from older/foreign snapshots without history don't claim a dir.
+        var panesWithHistfile: Set<UUID> = []
+        for snap in snapshots where validIDs.contains(snap.projectID) {
+            for tab in snap.tabs {
+                collectHistfilePanes(in: tab.splitRoot, into: &panesWithHistfile)
+            }
+        }
+        return snapshots.compactMap { snap in
             guard validIDs.contains(snap.projectID) else { return nil }
             let tabs = snap.tabs.map { t in
-                let root = restoreNode(t.splitRoot, projectID: snap.projectID)
+                let root = restoreNode(t.splitRoot, projectID: snap.projectID, panesWithHistfile: panesWithHistfile)
                 let focused = t.focusedPaneID.flatMap { root.findPane(id: $0)?.id } ?? root.allPanes().first?.id
                 return TerminalTab(id: t.id, splitRoot: root, focusedPaneID: focused, customTitle: t.customTitle)
             }
@@ -199,7 +398,20 @@ enum WorkspaceSerializer {
         }
     }
 
-    static func snapshotNode(_ node: SplitNode) -> SplitNodeSnapshot {
+    /// Collect the IDs of snapshot panes that recorded an on-disk history file.
+    private static func collectHistfilePanes(in node: SplitNodeSnapshot, into set: inout Set<UUID>) {
+        switch node {
+        case let .pane(p):
+            if let url = p.historyFileURL, !url.isEmpty {
+                set.insert(p.id)
+            }
+        case let .split(b):
+            collectHistfilePanes(in: b.first, into: &set)
+            collectHistfilePanes(in: b.second, into: &set)
+        }
+    }
+
+    static func snapshotNode(_ node: SplitNode, tabID: UUID) -> SplitNodeSnapshot {
         switch node {
         case let .pane(p):
             // Prefer the shell's live cwd over the pane's original project
@@ -208,25 +420,43 @@ enum WorkspaceSerializer {
             // surface hasn't reported a pwd yet.
             let path = p.nsView?.currentPwd ?? p.projectPath
             let needsAttention = p.executionState == .done
+            // Persist the pane's stable `histfileID` (not the volatile `id`) so the
+            // restored pane reuses the same on-disk history directory. Restore feeds
+            // `PaneSnapshot.id` back in as the new pane's `histfileID`.
+            _ = ensureHistfileExists(for: p.histfileID)
+            let historyFileURL = deriveHistfilePath(for: p.histfileID)?.path
             return .pane(PaneSnapshot(
-                id: p.id,
+                id: p.histfileID,
                 projectPath: path,
-                needsAttention: needsAttention
+                needsAttention: needsAttention,
+                historyFileURL: historyFileURL
             ))
         case let .split(b):
             return .split(SplitBranchSnapshot(
                 direction: b.direction,
                 ratio: Double(b.ratio),
-                first: snapshotNode(b.first),
-                second: snapshotNode(b.second)
+                first: snapshotNode(b.first, tabID: tabID),
+                second: snapshotNode(b.second, tabID: tabID)
             ))
         }
     }
 
-    private static func restoreNode(_ snap: SplitNodeSnapshot, projectID: UUID) -> SplitNode {
+    private static func restoreNode(_ snap: SplitNodeSnapshot, projectID: UUID, panesWithHistfile: Set<UUID>) -> SplitNode {
         switch snap {
         case let .pane(p):
-            let pane = Pane(projectPath: p.projectPath, projectID: projectID)
+            // Carry the snapshot ID forward as the pane's stable `histfileID` when
+            // the snapshot recorded a history file, so the restored pane reuses its
+            // existing history directory instead of spawning a fresh empty one.
+            // `Pane.ensureNSView` derives HISTFILE/ZDOTDIR from `histfileID` and
+            // creates the .zshenv, so nothing needs injecting into `env` here.
+            let pane = Pane(
+                projectPath: p.projectPath,
+                projectID: projectID,
+                command: nil,
+                shell: nil,
+                env: nil,
+                histfileID: panesWithHistfile.contains(p.id) ? p.id : UUID()
+            )
             if p.needsAttention == true {
                 pane.restoreNeedsAttention()
             }
@@ -235,8 +465,8 @@ enum WorkspaceSerializer {
             return .split(SplitBranch(
                 direction: b.direction,
                 ratio: CGFloat(b.ratio),
-                first: restoreNode(b.first, projectID: projectID),
-                second: restoreNode(b.second, projectID: projectID)
+                first: restoreNode(b.first, projectID: projectID, panesWithHistfile: panesWithHistfile),
+                second: restoreNode(b.second, projectID: projectID, panesWithHistfile: panesWithHistfile)
             ))
         }
     }
