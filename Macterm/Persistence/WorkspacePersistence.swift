@@ -28,8 +28,8 @@ func deriveHistfilePath(for paneID: UUID) -> URL? {
     deriveHistfileDirPath(for: paneID)?.appendingPathComponent(".zsh_history", isDirectory: false)
 }
 
-/// Creates a pane-specific histfile directory and `.zshenv` eagerly (e.g. at pane spawn time).
-/// This ensures .zshenv exists BEFORE the shell starts so zsh can source it and set HISTFILE.
+/// Creates a pane-specific histfile directory and its ZDOTDIR dotfiles eagerly (e.g. at
+/// pane spawn time), so they exist BEFORE the shell starts and zsh can source them.
 @MainActor
 func ensureHistfileDirExists(for paneID: UUID) -> URL? {
     let url = deriveHistfilePath(for: paneID)
@@ -50,8 +50,9 @@ func ensureHistfileDirExists(for paneID: UUID) -> URL? {
     return url
 }
 
-/// Ensures a pane-specific histfile directory exists with a proper `.zshenv` that exports HISTFILE.
-/// This .zshenv loads BEFORE any user dot files (including /etc/zshrc), so HISTFILE can't be overridden.
+/// Ensures a pane-specific histfile directory exists with the ZDOTDIR dotfile mirror.
+/// HISTFILE is reasserted in the generated `.zshrc` (after the user's config and
+/// /etc/zshrc), so the per-pane histfile can't be overridden.
 @MainActor
 private func ensureHistfileExists(for paneID: UUID) -> URL? {
     let url = deriveHistfilePath(for: paneID)
@@ -64,7 +65,7 @@ private func ensureHistfileExists(for paneID: UUID) -> URL? {
         withIntermediateDirectories: true
     )
 
-    // Create the pane-specific histfile directory with a .zshenv for ZDOTDIR isolation.
+    // Create the pane-specific histfile directory with its ZDOTDIR dotfile mirror.
     // Keep ZDOTDIR permanently pointing here (never unset) so /etc/zshrc's
     // ${ZDOTDIR:-$HOME} defaults to our dir instead of the user's home.
     let dirURL = deriveHistfileDirPath(for: paneID)
@@ -75,54 +76,91 @@ private func ensureHistfileExists(for paneID: UUID) -> URL? {
     return url
 }
 
-/// Ensures a .zshenv exists in the given histfile directory for zsh shells.
+/// Writes the ZDOTDIR dotfile mirror into the given histfile directory for zsh shells.
 /// The key insight: keep ZDOTDIR permanently pointing to this directory (never unset),
 /// so /etc/zshrc's ${ZDOTDIR:-$HOME}/.zsh_history defaults to our dir instead of ~.
-/// Then chain to the user's own dot files AND re-load ghostty's shell integration,
-/// which our ZDOTDIR override would otherwise suppress (see zshenvContent).
+/// Then mirror the user's own dot files phase-by-phase (see `zdotdirFiles`) so their
+/// config loads at its *normal* startup phase, AND re-load ghostty's shell integration,
+/// which our ZDOTDIR override would otherwise suppress.
 @MainActor
 private func ensureZshenvIn(histfilePath: String, at dirURL: URL) {
-    let zshenv = dirURL.appendingPathComponent(".zshenv", isDirectory: false)
     // Always (re)write — the content is deterministic, so overwriting is idempotent
     // and auto-heals any stale file from an older format.
-    try? zshenvContent(histfilePath: histfilePath).write(to: zshenv, atomically: true, encoding: .utf8)
+    for (name, content) in zdotdirFiles(histfilePath: histfilePath) {
+        let url = dirURL.appendingPathComponent(name, isDirectory: false)
+        try? content.write(to: url, atomically: true, encoding: .utf8)
+    }
 }
 
-/// The `.zshenv` we drop into a pane's ZDOTDIR. It must do three things, in order:
+/// The dotfiles we drop into a pane's ZDOTDIR — one per zsh startup phase.
 ///
-///   1. Export our per-pane HISTFILE (before /etc/zshrc's
-///      `HISTFILE=${ZDOTDIR:-$HOME}/.zsh_history` — which now resolves *here*
-///      because ZDOTDIR points at us, not $HOME).
-///   2. Chain to the user's real ~/.zshenv and ~/.zshrc so their config still loads.
-///   3. **Re-source ghostty's shell integration.** Ghostty normally injects its
-///      integration by pointing ZDOTDIR at its own integration dir so *its* .zshenv
-///      runs. Our ZDOTDIR override replaces that, so ghostty's integration never
-///      loads — no OSC 133 prompt markers — and ghostty then believes a command is
-///      perpetually running, popping a spurious "zsh is still running" quit dialog.
-///      Sourcing `ghostty-integration` (ghostty's documented manual hook) restores
-///      the markers. It's loaded AFTER ~/.zshrc because it needs the user's fpath.
-private func zshenvContent(histfilePath: String) -> String {
-    """
-    # This directory IS zsh's config root for this pane (keep ZDOTDIR permanently).
-    export HISTFILE="\(histfilePath)"
+/// Splitting them (rather than cramming everything into `.zshenv`) is what lets the
+/// user's `~/.zshrc` load at its *normal* phase — **after** `/etc/zshrc` — so their
+/// PROMPT/PS1 wins. Sourcing `~/.zshrc` from `.zshenv` (the previous approach) ran it
+/// *before* `/etc/zshrc`, whose `PS1="%n@%m %1~ %# "` then clobbered the user's prompt.
+///
+/// zsh reads, in order: `$ZDOTDIR/.zshenv` → `.zprofile` (login) → `.zshrc`
+/// (interactive) → `.zlogin` (login). Because ZDOTDIR points here for the pane's whole
+/// life, the user's own `~/.z*` files would never be read; each generated file chains
+/// to its `~/` counterpart at the matching phase (absolute path, so no recursion since
+/// ZDOTDIR ≠ $HOME). Errors are not swallowed (only `|| true` guards abort), matching
+/// native zsh — a broken prompt framework should surface, not fail silently.
+///
+/// HISTFILE is set in `.zshenv` (defined for every shell) and re-exported at the end of
+/// `.zshrc` — after `~/.zshrc` and after `/etc/zshrc`'s `${ZDOTDIR:-$HOME}/.zsh_history`
+/// — so the per-pane file is the last writer. ghostty's shell integration is sourced at
+/// the end of `.zshrc` too: our ZDOTDIR override suppresses ghostty's own injection, and
+/// without the OSC 133 markers ghostty believes a command is perpetually running and
+/// pops a spurious "zsh is still running" quit dialog. It defers to the first precmd, so
+/// it wraps whatever prompt `~/.zshrc` ends up with, and needs the user's fpath first.
+private func zdotdirFiles(histfilePath: String) -> [(name: String, content: String)] {
+    [
+        (".zshenv", """
+        # Per-pane HISTFILE isolation; ZDOTDIR points here for this pane's lifetime.
+        export HISTFILE="\(histfilePath)"
 
-    # Chain to the user's real dot files so their config still loads.
-    if [[ -f "$HOME/.zshenv" ]]; then
-        builtin source -- "$HOME/.zshenv" 2>/dev/null || true
-    fi
-    if [[ -o interactive && -f "$HOME/.zshrc" ]]; then
-        builtin source -- "$HOME/.zshrc" 2>/dev/null || true
-    fi
+        # Chain to the user's real ~/.zshenv at its normal phase.
+        if [[ -f "$HOME/.zshenv" ]]; then
+            builtin source -- "$HOME/.zshenv" || true
+        fi
 
-    # Re-load ghostty's shell integration (OSC 133 prompt markers). Our ZDOTDIR
-    # override suppresses ghostty's own ZDOTDIR-based injection; without this the
-    # app shows a spurious "zsh is still running" dialog on quit.
-    if [[ -o interactive && -n "$GHOSTTY_RESOURCES_DIR" \\
-          && -r "$GHOSTTY_RESOURCES_DIR/shell-integration/zsh/ghostty-integration" ]]; then
-        builtin source -- "$GHOSTTY_RESOURCES_DIR/shell-integration/zsh/ghostty-integration"
-    fi
+        """),
+        (".zprofile", """
+        # Chain to the user's real ~/.zprofile at its normal phase (login shells).
+        if [[ -f "$HOME/.zprofile" ]]; then
+            builtin source -- "$HOME/.zprofile" || true
+        fi
 
-    """
+        """),
+        (".zshrc", """
+        # Load the user's real interactive config at its normal phase — after
+        # /etc/zshrc — so their PROMPT/PS1, HISTSIZE, etc. are the last writers.
+        if [[ -f "$HOME/.zshrc" ]]; then
+            builtin source -- "$HOME/.zshrc" || true
+        fi
+
+        # Reassert our per-pane HISTFILE last, beating /etc/zshrc's
+        # ${ZDOTDIR:-$HOME}/.zsh_history and any HISTFILE the user set.
+        export HISTFILE="\(histfilePath)"
+
+        # Re-load ghostty's shell integration (OSC 133 prompt markers). Our ZDOTDIR
+        # override suppresses ghostty's own injection; without this the app shows a
+        # spurious "zsh is still running" dialog on quit. Sourced after ~/.zshrc so it
+        # has the user's fpath and wraps the final prompt.
+        if [[ -n "$GHOSTTY_RESOURCES_DIR" \\
+              && -r "$GHOSTTY_RESOURCES_DIR/shell-integration/zsh/ghostty-integration" ]]; then
+            builtin source -- "$GHOSTTY_RESOURCES_DIR/shell-integration/zsh/ghostty-integration"
+        fi
+
+        """),
+        (".zlogin", """
+        # Chain to the user's real ~/.zlogin at its normal phase (login shells).
+        if [[ -f "$HOME/.zlogin" ]]; then
+            builtin source -- "$HOME/.zlogin" || true
+        fi
+
+        """),
+    ]
 }
 
 /// Derives a project-level HISTFILE URL for panes that don't go through
