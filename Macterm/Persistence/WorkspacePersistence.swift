@@ -39,7 +39,7 @@ func ensureHistfileDirExists(for paneID: UUID) -> URL? {
 
     let dirURL = deriveHistfileDirPath(for: paneID)
     if let dirURL {
-        ensureZshenvIn(histfileDir: url.path, at: dirURL)
+        ensureZshenvIn(histfilePath: url.path, at: dirURL)
     }
 
     return url
@@ -64,7 +64,7 @@ private func ensureHistfileExists(for paneID: UUID) -> URL? {
     // ${ZDOTDIR:-$HOME} defaults to our dir instead of the user's home.
     let dirURL = deriveHistfileDirPath(for: paneID)
     if let dirURL {
-        ensureZshenvIn(histfileDir: url.path, at: dirURL)
+        ensureZshenvIn(histfilePath: url.path, at: dirURL)
     }
 
     return url
@@ -75,7 +75,7 @@ private func ensureHistfileExists(for paneID: UUID) -> URL? {
 /// so /etc/zshrc's ${ZDOTDIR:-$HOME}/.zsh_history defaults to our dir instead of ~.
 /// Then source ~/.zshenv so ghostty integration and user configs still load.
 @MainActor
-private func ensureZshenvIn(histfileDir: String, at dirURL: URL) {
+private func ensureZshenvIn(histfilePath: String, at dirURL: URL) {
     let zshenv = dirURL.appendingPathComponent(".zshenv", isDirectory: false)
     // Always (re)write — the content is deterministic from histfileDir, so overwriting
     // is idempotent and auto-heals any stale file from an older format.
@@ -84,7 +84,7 @@ private func ensureZshenvIn(histfileDir: String, at dirURL: URL) {
     // our dir instead of ~ because ZDOTDIR is always set to us.
     let content = """
     # This directory IS zsh's config root for this pane (keep ZDOTDIR permanently).
-    export HISTFILE="\(histfileDir)"
+    export HISTFILE="\(histfilePath)"
 
     # Source user's ~/.zshrc so ghostty integration and user configs still load.
     if [[ -f "$HOME/.zshrc" ]]; then
@@ -120,7 +120,7 @@ func quickTerminalHistfileDirURL() -> String? {
     let sub = dir.appendingPathComponent("qt", isDirectory: true)
     try? FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
     if let histfilePath = quickTerminalHistfileURL() {
-        ensureZshenvIn(histfileDir: histfilePath, at: sub)
+        ensureZshenvIn(histfilePath: histfilePath, at: sub)
     }
     return sub.path
 }
