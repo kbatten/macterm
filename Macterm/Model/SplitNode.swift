@@ -302,7 +302,8 @@ final class Pane: Identifiable {
     /// ghostty config / login shell at surface-creation time.
     let shell: String?
     /// Extra environment variables for the spawned shell. nil/empty → none.
-    let env: [String: String]?
+    /// Mutable so callers (e.g. QuickTerminal) can inject additional vars like HISTFILE after init.
+    var env: [String: String]?
     /// The basename of the pane's live foreground process — a running command
     /// (`hx`, `btop`), or the pane's shell when idle at a prompt (so a nested
     /// `zsh` launched inside `nu` shows `zsh`). nil only before the surface
@@ -605,6 +606,26 @@ final class Pane: Identifiable {
         // not configuration.
         var mergedEnv = env ?? [:]
         mergedEnv[ControlProtocol.sessionEnvVar] = sessionName
+        // Per-pane zsh history: point ZDOTDIR at this pane's own histfile dir so
+        // our generated .zshenv loads before any user dot file — or /etc/zshrc —
+        // can override HISTFILE. The dir (and its dotfile mirror, which also
+        // re-loads ghostty's shell integration — see zdotdirFiles) must exist
+        // before the shell spawns, hence creating it here.
+        //
+        // Keyed off `sessionID`: it's persisted verbatim in the snapshot, so a
+        // restored pane reattaches to the same history instead of orphaning a
+        // fresh empty dir every launch. `id` would be wrong — it's regenerated
+        // on every restore.
+        //
+        // Skipped for zsh only (ZDOTDIR has no equivalent elsewhere), for remote
+        // panes (their shell runs on the host and never sees these vars), and
+        // when a caller already resolved its own dir — the QuickTerminal's panes
+        // are ephemeral and deliberately share one history.
+        if !isRemote, mergedEnv["ZDOTDIR"] == nil, LoginShell.isZsh(explicit: shell),
+           let zdotdir = ensureHistfileDirExists(for: sessionID)?.path
+        {
+            mergedEnv["ZDOTDIR"] = zdotdir
+        }
         let view = GhosttyTerminalNSView(
             workingDirectory: projectPath,
             sessionName: sessionName,
@@ -699,19 +720,9 @@ final class Pane: Identifiable {
     }
 
     /// Display fallback for a pane with no foreground process yet (its surface
-    /// hasn't been created) — the name of the login shell it will run. Resolves
-    /// from the password database (`getpwuid`), the same shell libghostty
-    /// launches when no explicit `command` is set. We avoid `$SHELL`: that's the
-    /// shell of whatever launched the app (often `/bin/zsh`), not the user's
-    /// login shell, so a `nu` user would otherwise see "zsh". Once the surface
-    /// is live, `foregroundProcessName` (the actual `comm`) takes over.
-    private static let defaultShellName: String = {
-        let loginShell = getpwuid(getuid())?.pointee.pw_shell.map { String(cString: $0) }
-        let shell = (loginShell?.isEmpty == false ? loginShell : nil)
-            ?? ProcessInfo.processInfo.environment["SHELL"]
-            ?? "/bin/zsh"
-        return (shell as NSString).lastPathComponent
-    }()
+    /// hasn't been created) — the name of the login shell it will run. Once the
+    /// surface is live, `foregroundProcessName` (the actual `comm`) takes over.
+    private static var defaultShellName: String { LoginShell.name }
 
     var sidebarSegmentTitle: String {
         displayTitle

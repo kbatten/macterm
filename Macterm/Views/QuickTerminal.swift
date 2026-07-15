@@ -328,12 +328,31 @@ final class QuickTerminalSplitState {
         set { tab.focusedPaneID = newValue }
     }
 
+    /// Re-inject HISTFILE into all panes — used after any mutation that could create new panes.
+    private func injectHistfile() {
+        guard let histfilePath = quickTerminalHistfilePath() else { return }
+        for pane in tab.splitRoot.allPanes() {
+            var env = pane.env ?? [:]
+            if !env.keys.contains("HISTFILE") { env["HISTFILE"] = histfilePath }
+            // For zsh shells, also set ZDOTDIR to our histfile directory so that
+            // .zshenv loads before any user dot files can override HISTFILE.
+            // Injected here rather than left to `Pane.ensureNSView`: quick
+            // terminal sessions are ephemeral and deliberately SHARE one history,
+            // so they resolve their own dir instead of a per-session one.
+            if LoginShell.isZsh(), let zdotdir = quickTerminalHistfileDirURL() {
+                if !env.keys.contains("ZDOTDIR") { env["ZDOTDIR"] = zdotdir }
+            }
+            pane.env = env
+        }
+    }
+
     init() {
         tab = TerminalTab(
             projectPath: NSHomeDirectory(),
             projectID: QuickTerminalService.ephemeralProjectID,
             sessionSlug: ZmxSessionName.quickTerminalSlug
         )
+        injectHistfile()
     }
 
     func focusPane(_ paneID: UUID) {
@@ -390,10 +409,12 @@ final class QuickTerminalSplitState {
 
     func split(paneID: UUID, direction: SplitDirection) {
         tab.split(paneID: paneID, direction: direction)
+        injectHistfile()
     }
 
     func autoSplit(paneID: UUID) {
         tab.autoSplit(paneID: paneID)
+        injectHistfile()
     }
 
     func resize(_ direction: PaneFocusDirection, delta: CGFloat = 0.03) {
@@ -414,6 +435,7 @@ final class QuickTerminalSplitState {
                 projectID: QuickTerminalService.ephemeralProjectID,
                 sessionSlug: ZmxSessionName.quickTerminalSlug
             )
+            injectHistfile()
         case .removed,
              .notFound:
             break

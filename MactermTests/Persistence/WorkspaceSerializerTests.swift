@@ -69,6 +69,36 @@ struct WorkspaceSerializerTests {
     }
 
     @Test
+    func round_trip_preserves_session_id_so_history_dir_is_reused() {
+        // The pane's history dir is keyed by `sessionID` (see
+        // `deriveHistfileDirPath`), so that id must survive restore unchanged —
+        // otherwise every relaunch reads a fresh empty dir and orphans the last
+        // one. The transient `id` is regenerated and must never be the key.
+        let ws = Workspace(projectID: UUID(), projectPath: "/tmp")
+        guard case let .pane(original) = ws.tabs[0].splitRoot else {
+            Issue.record("expected leaf")
+            return
+        }
+        let originalSessionID = original.sessionID
+
+        let roundTripped = roundTrip([ws.projectID: ws])
+        guard case let .pane(restored) = roundTripped[0].tabs[0].splitRoot else {
+            Issue.record("expected leaf")
+            return
+        }
+        #expect(restored.sessionID == originalSessionID)
+        #expect(restored.id != original.id)
+        // A second round-trip is stable too: the regression this guards was drift
+        // that only compounded across repeated restarts.
+        let twice = roundTrip([roundTripped[0].projectID: roundTripped[0]])
+        guard case let .pane(restoredAgain) = twice[0].tabs[0].splitRoot else {
+            Issue.record("expected leaf")
+            return
+        }
+        #expect(restoredAgain.sessionID == originalSessionID)
+    }
+
+    @Test
     func round_trip_preserves_active_tab_when_valid() {
         let ws = Workspace(projectID: UUID(), projectPath: "/tmp")
         let second = ws.createTab(projectPath: "/tmp")
