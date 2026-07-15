@@ -424,7 +424,9 @@ final class Pane: Identifiable {
         // Ensure the histfile directory with .zshenv exists before the surface spawns.
         // This provides per-pane HISTFILE isolation for zsh shells by setting ZDOTDIR
         // so our .zshenv is loaded first, before /etc/zshrc can override HISTFILE.
-        ensurePaneHistfileDir()
+        // Shared with the persistence/restore path so the .zshenv format stays in
+        // one place (it also re-loads ghostty's shell integration — see zshenvContent).
+        _ = ensureHistfileDirExists(for: id)
         let view = GhosttyTerminalNSView(workingDirectory: projectPath, command: command, shell: shell, env: env, paneID: id)
         _nsView = view
         return view
@@ -536,51 +538,6 @@ final class Pane: Identifiable {
         self.shell = shell
         self.env = env
         executionTracker = TerminalExecutionTracker(hasUserInteraction: command != nil)
-    }
-
-    /// Derives the pane-specific histfile directory URL for ZDOTDIR isolation on zsh.
-    private var histfileDirPath: URL? {
-        guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
-        let dir = appSupport.appendingPathComponent("macterm/history", isDirectory: true)
-        let sub = dir.appendingPathComponent("pane_\(id.uuidString)", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return sub
-    }
-
-    /// Derives the pane-specific histfile file URL.
-    private var histfilePath: URL? {
-        histfileDirPath?.appendingPathComponent(".zsh_history", isDirectory: false)
-    }
-
-    /// Creates the pane's histfile directory and `.zshenv` if they don't already exist.
-    /// This must run BEFORE the shell starts so zsh can source .zshenv first (before /etc/zshrc).
-    /// Keep ZDOTDIR permanently pointing here — never unset it, or /etc/zshrc's
-    /// ${ZDOTDIR:-$HOME}/.zsh_history defaults to ~ again. Source ~/.zshenv so
-    /// ghostty integration and user configs still load.
-    private func ensurePaneHistfileDir() {
-        guard let url = histfilePath else { return }
-        if !FileManager.default.fileExists(atPath: url.path) {
-            try? Data().write(to: url, options: .atomic)
-        }
-
-        let dirURL = histfileDirPath
-        guard let dirURL else { return }
-        let zshenv = dirURL.appendingPathComponent(".zshenv", isDirectory: false)
-        // Always (re)write — the content is deterministic from the pane's histfile path, so
-        // overwriting is idempotent and auto-heals any stale file from an older format.
-        // Keep ZDOTDIR permanently at our histfile-dir (never unset — that's what caused the bug).
-        // /etc/zshrc's `HISTFILE=${ZDOTDIR:-$HOME}/.zsh_history` will always default to us.
-        let content = """
-        # This directory IS zsh's config root for this pane (keep ZDOTDIR permanently).
-        export HISTFILE="\(url.path)"
-
-        # Source user's ~/.zshenv so ghostty integration and user configs still load.
-        if [[ -f "$HOME/.zshenv" ]]; then
-            builtin source -- "$HOME/.zshenv" 2>/dev/null || true
-        fi
-
-        """
-        try? content.write(to: zshenv, atomically: true, encoding: .utf8)
     }
 }
 
