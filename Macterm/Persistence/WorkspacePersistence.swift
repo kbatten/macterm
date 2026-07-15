@@ -3,7 +3,10 @@ import os
 
 private let logger = Logger(subsystem: appBundleID, category: "WorkspacePersistence")
 
-private let quickTerminalPaneID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+/// Shared sentinel identity for all QuickTerminal panes: they merge one history
+/// file and one scrollback file across sessions (QuickTerminal is ephemeral and
+/// never workspace-persisted, so it can't key off a per-pane `histfileID`).
+let quickTerminalPaneID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
 
 // MARK: - Histfile storage helpers
 
@@ -150,6 +153,56 @@ func quickTerminalHistfileDirURL() -> String? {
         ensureZshenvIn(histfilePath: histfilePath, at: sub)
     }
     return sub.path
+}
+
+// MARK: - Scrollback storage helpers
+
+/// Derives the pane-specific scrollback file URL, reusing the same
+/// `pane_<paneID>/` directory as the histfile so all per-pane state lives in
+/// one place. Keyed on the pane's stable `histfileID` (not its volatile
+/// runtime `id`) so a restored pane re-binds to its own saved scrollback.
+@MainActor
+func deriveScrollbackPath(for paneID: UUID) -> URL? {
+    deriveHistfileDirPath(for: paneID)?.appendingPathComponent("scrollback", isDirectory: false)
+}
+
+/// Persists a pane's scrollback text to disk. Creates the pane directory if
+/// needed. Empty text removes any existing file (nothing worth restoring).
+@MainActor
+func writeScrollbackFile(_ text: String, for paneID: UUID) {
+    guard let url = deriveScrollbackPath(for: paneID) else { return }
+    if text.isEmpty {
+        removeScrollbackFile(for: paneID)
+        return
+    }
+    try? FileManager.default.createDirectory(
+        at: url.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+    )
+    do {
+        try text.write(to: url, atomically: true, encoding: .utf8)
+    } catch {
+        logger.error("writeScrollbackFile failed: \(error.localizedDescription, privacy: .public)")
+    }
+}
+
+/// Reads a pane's previously saved scrollback text, or nil if none exists.
+@MainActor
+func readScrollbackFile(for paneID: UUID) -> String? {
+    guard let url = deriveScrollbackPath(for: paneID),
+          FileManager.default.fileExists(atPath: url.path),
+          let text = try? String(contentsOf: url, encoding: .utf8),
+          !text.isEmpty
+    else { return nil }
+    return text
+}
+
+/// Deletes a pane's saved scrollback file (used after restoring it, and when a
+/// pane is permanently closed so no orphan file lingers).
+@MainActor
+func removeScrollbackFile(for paneID: UUID) {
+    guard let url = deriveScrollbackPath(for: paneID) else { return }
+    try? FileManager.default.removeItem(at: url)
 }
 
 // MARK: - File envelope
