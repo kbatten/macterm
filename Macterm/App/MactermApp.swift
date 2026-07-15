@@ -55,7 +55,13 @@ struct MactermApp: App {
                     appDelegate.appState = appState
                     appDelegate.projectStore = projectStore
                     NotificationHandler.shared.appState = appState
-                    appDelegate.onTerminate = { [appState] in appState.saveWorkspaces() }
+                    appDelegate.onTerminate = { [appState] in
+                        // Surfaces are still alive here, so capture each pane's
+                        // scrollback before the JSON snapshot / process exit.
+                        appState.saveAllScrollback()
+                        QuickTerminalService.shared.saveScrollback()
+                        appState.saveWorkspaces()
+                    }
                     appDelegate.installResponders(appState: appState, projectStore: projectStore)
                 }
         }

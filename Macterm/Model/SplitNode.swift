@@ -257,6 +257,11 @@ final class Pane: Identifiable {
     /// Extra environment variables for the spawned shell. nil/empty → none.
     /// Mutable so callers (e.g. QuickTerminal) can inject additional vars like HISTFILE after init.
     var env: [String: String]?
+    /// Overrides the identity used to look up this pane's saved scrollback on
+    /// spawn (default: `histfileID`). QuickTerminal sets this to its shared
+    /// sentinel so all quick-terminal panes restore/save one merged scrollback,
+    /// like they already share one history file. Set before the surface exists.
+    var scrollbackRestoreID: UUID?
     /// The basename of the pane's live foreground process — a running command
     /// (`hx`, `btop`), or the pane's shell when idle at a prompt (so a nested
     /// `zsh` launched inside `nu` shows `zsh`). nil only before the surface
@@ -434,7 +439,16 @@ final class Pane: Identifiable {
         // one place (it also re-loads ghostty's shell integration — see zshenvContent).
         // Keyed off `histfileID` (stable across restarts), not `id` (fresh each launch).
         _ = ensureHistfileDirExists(for: histfileID)
-        let view = GhosttyTerminalNSView(workingDirectory: projectPath, command: command, shell: shell, env: env, paneID: histfileID)
+        // `paneID` keys the on-disk per-pane state (histfile ZDOTDIR + scrollback
+        // restore). Defaults to the stable `histfileID`; QuickTerminal overrides
+        // it with a shared sentinel so its panes restore one merged scrollback.
+        let view = GhosttyTerminalNSView(
+            workingDirectory: projectPath,
+            command: command,
+            shell: shell,
+            env: env,
+            paneID: scrollbackRestoreID ?? histfileID
+        )
         _nsView = view
         return view
     }
