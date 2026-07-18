@@ -45,6 +45,10 @@ private struct GeneralSettings: View {
 
     @State
     private var terminalScrollSpeed: Double = Preferences.shared.terminalScrollSpeed
+    @AppStorage(Preferences.Keys.restoreScrollback)
+    private var restoreScrollback = true
+    @State
+    private var scrollbackLines: Int = Preferences.shared.scrollbackRestoreLines
     @State
     private var ghosttyConfigPath: String = Preferences.shared.userGhosttyConfigPath
 
@@ -97,6 +101,28 @@ private struct GeneralSettings: View {
                 Text("Controls terminal scrollback speed for trackpads and mouse wheels.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
+
+                Toggle("Restore scrollback on reopen", isOn: $restoreScrollback)
+                    .onChange(of: restoreScrollback) { _, v in
+                        Preferences.shared.restoreScrollback = v
+                    }
+                if restoreScrollback {
+                    HStack {
+                        Text("Lines to restore")
+                        Spacer()
+                        TextField("", value: $scrollbackLines, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .multilineTextAlignment(.trailing)
+                            .frame(width: 80)
+                            .onSubmit { commitScrollbackLines() }
+                    }
+                }
+                Text(
+                    "Replays the last lines of each pane's previous output — dimmed, above the fresh prompt — "
+                        + "when a pane is reopened after quitting or reloading a project. Applies to Quick Terminal too."
+                )
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
             }
 
             Section("Layout") {
@@ -154,6 +180,14 @@ private struct GeneralSettings: View {
         guard ghosttyConfigPath != Preferences.shared.userGhosttyConfigPath else { return }
         Preferences.shared.userGhosttyConfigPath = ghosttyConfigPath
         GhosttyApp.shared.reloadAndReport()
+    }
+
+    /// Clamp the typed line count into a sane range and persist it, reflecting
+    /// the clamped value back into the field.
+    private func commitScrollbackLines() {
+        let clamped = max(100, min(100_000, scrollbackLines))
+        scrollbackLines = clamped
+        Preferences.shared.scrollbackRestoreLines = clamped
     }
 
     private func browse() {

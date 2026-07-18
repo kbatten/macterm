@@ -555,6 +555,15 @@ enum ZmxSocketBudget {
         return String(trimmed)
     }
 
+    /// The unix socket zmx binds for `sessionName`: `<socketDir>/<name>` — the
+    /// same path `probe` budgets a worst-case name against.
+    static func socketPath(
+        for sessionName: String,
+        env: [String: String] = ProcessInfo.processInfo.environment
+    ) -> String {
+        "\(socketDir(env: env))/\(sessionName)"
+    }
+
     /// Non-nil reason when `<dir>/macterm-<UUID>` would not fit; nil = safe.
     static func probe(env: [String: String] = ProcessInfo.processInfo.environment) -> String? {
         let dir = socketDir(env: env)
@@ -599,5 +608,25 @@ enum ZmxAttach {
     static func wrapperArgv(executablePath: String?, sessionID: String) -> [String] {
         guard let executablePath else { return [] }
         return [executablePath, "attach", sessionID]
+    }
+
+    /// Whether `sessionName`'s daemon is already up — i.e. the `zmx attach`
+    /// above will REATTACH a live session rather than create one.
+    ///
+    /// Read from the socket zmx binds per session (`<socketDir>/<name>`), so
+    /// the answer costs one `stat` on the synchronous spawn path; `zmx ls`
+    /// would be an async fork/exec per pane, far too heavy here.
+    ///
+    /// This never gates the launch — `wrapperArgv` stays unconditional and zmx
+    /// itself remains authoritative for attach-vs-create (a stale socket from a
+    /// crashed daemon reads as live here, and zmx would still create). It only
+    /// informs cosmetic spawn-time choices like scrollback restore, where being
+    /// wrong costs a duplicated or absent banner, never a broken pane.
+    static func isSessionLive(
+        sessionName: String,
+        env: [String: String] = ProcessInfo.processInfo.environment,
+        fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+    ) -> Bool {
+        fileExists(ZmxSocketBudget.socketPath(for: sessionName, env: env))
     }
 }

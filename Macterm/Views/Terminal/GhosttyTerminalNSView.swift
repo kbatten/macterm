@@ -27,6 +27,11 @@ final class GhosttyTerminalNSView: NSView {
     /// For a remote pane the same name identifies the session on the REMOTE
     /// host's daemon instead.
     private let sessionName: String
+    /// Identity keying this pane's saved scrollback on disk — the owning
+    /// `Pane.sessionID` (stable across restarts, so a restored pane re-binds to
+    /// its own text), or the shared sentinel for QuickTerminal's panes. nil →
+    /// no scrollback restore for this surface.
+    private let paneID: UUID?
 
     /// The parsed `[user@]host:dir` spec when this pane belongs to a remote
     /// project (#104); nil for local panes. A remote surface runs
@@ -186,7 +191,8 @@ final class GhosttyTerminalNSView: NSView {
         shell: String? = nil,
         env: [String: String]? = nil,
         remoteSpec: ProjectPath? = nil,
-        remoteZmxPath: String? = nil
+        remoteZmxPath: String? = nil,
+        paneID: UUID? = nil
     ) {
         self.workingDirectory = workingDirectory
         self.sessionName = sessionName
@@ -195,6 +201,7 @@ final class GhosttyTerminalNSView: NSView {
         self.env = env
         self.remoteSpec = remoteSpec
         self.remoteZmxPath = remoteZmxPath
+        self.paneID = paneID
         super.init(frame: .zero)
         setupTrackingArea()
         registerForDraggedTypes(Array(Self.dropTypes))
@@ -297,8 +304,32 @@ final class GhosttyTerminalNSView: NSView {
         // the socket-path budget) → no wrapper, a plain unpersisted shell.
         // The argv element buffers come from `cString` (freed in
         // destroySurface); the pointer array is bound around the spawn below.
-        let wrapperArgv: [UnsafePointer<CChar>?] = remoteSpec != nil ? [] : ZmxAttach.wrapperArgv(
-            executablePath: ZmxClient.live.executableURL()?.path,
+        let zmxExecutable = remoteSpec != nil ? nil : ZmxClient.live.executableURL()?.path
+
+        // Whether this spawn reattaches a session that kept running, and so
+        // comes back carrying its own buffer — restoring on top of that would
+        // duplicate it. Remote panes (#104) can't be probed without an ssh
+        // round-trip on the interactive spawn path, and their host-side daemon
+        // outlives even a local reboot, so a saved blob there is a reattach by
+        // assumption. An unwrapped pane (zmx unbundled or over the socket
+        // budget) is a plain, unpersisted shell — always fresh.
+        let isReattach: Bool = if remoteSpec != nil {
+            true
+        } else if zmxExecutable == nil {
+            false
+        } else {
+            ZmxAttach.isSessionLive(sessionName: sessionName)
+        }
+
+        // The scrollback to replay above this surface's first prompt, if any.
+        // Consumed (deleted) on read so a mid-session surface recreation can't
+        // replay it a second time; the next quit rewrites it from the live
+        // buffer.
+        let restoreBanner = restoreBannerToReplay(skip: isReattach, for: paneID)
+        if restoreBanner != nil, let paneID { removeScrollbackFile(for: paneID) }
+
+        let wrapperArgv: [UnsafePointer<CChar>?] = ZmxAttach.wrapperArgv(
+            executablePath: zmxExecutable,
             sessionID: sessionName
         ).map { cString($0) }
 
@@ -342,6 +373,24 @@ final class GhosttyTerminalNSView: NSView {
                     surface = ghostty_surface_new(app, &config)
                 }
             }
+        }
+
+        // Replay a previous session's scrollback above the fresh prompt, unless
+        // this spawn reattaches a live session (which comes back carrying its
+        // own buffer — restoring on top of that would duplicate it).
+        //
+        // KNOWN INCOMPLETE for zmx-WRAPPED panes: zmx emits `ESC[2J ESC[H` when
+        // it CREATES a session, and that clear lands *after* this injection, so
+        // it eats exactly the last `rows` lines of the restored text — a blob
+        // shorter than the grid is lost entirely. Fixing it needs `rows`-many
+        // trailing newlines emitted with the text, which only libghostty can do
+        // (`ghostty_surface_size` needs a live surface; this runs before the
+        // spawn). Tracked for the fork's initial-output patch. Both zmx-native
+        // workarounds are dead ends: the buffer zmx replays into `zmx history`
+        // is never delivered to a client, so neither a wrapper preamble nor
+        // `zmx print` reaches the screen (measured).
+        if let restoreBanner {
+            config.initial_output = cString(restoreBanner)
         }
 
         // The command_wrapper argv (a `const char* const*`) needs the pointer
@@ -424,6 +473,27 @@ final class GhosttyTerminalNSView: NSView {
         let bytes = UnsafeBufferPointer(start: ptr, count: Int(tty.len)).map { UInt8(bitPattern: $0) }
         guard let name = String(bytes: bytes, encoding: .utf8), !name.isEmpty else { return nil }
         return name
+    }
+
+    /// Reads this surface's full screen + scrollback as plain text (libghostty
+    /// drops styling), returning at most the last `maxLines` lines, or nil when
+    /// there's no surface or no content. Used to persist a pane's scrollback so
+    /// a reopened pane can replay recent context.
+    func readScrollback(maxLines: Int) -> String? {
+        guard let surface, maxLines > 0 else { return nil }
+        // Whole buffer: screen top-left → screen bottom-right (scrollback + active).
+        let selection = ghostty_selection_s(
+            top_left: ghostty_point_s(tag: GHOSTTY_POINT_SCREEN, coord: GHOSTTY_POINT_COORD_TOP_LEFT, x: 0, y: 0),
+            bottom_right: ghostty_point_s(tag: GHOSTTY_POINT_SCREEN, coord: GHOSTTY_POINT_COORD_BOTTOM_RIGHT, x: 0, y: 0),
+            rectangle: false
+        )
+        var text = ghostty_text_s()
+        guard ghostty_surface_read_text(surface, selection, &text) else { return nil }
+        defer { ghostty_surface_free_text(surface, &text) }
+        guard let ptr = text.text, text.text_len > 0 else { return nil }
+        let bytes = UnsafeBufferPointer(start: ptr, count: Int(text.text_len)).map { UInt8(bitPattern: $0) }
+        guard let full = String(bytes: bytes, encoding: .utf8), !full.isEmpty else { return nil }
+        return ScrollbackText.lastLines(full, maxLines: maxLines)
     }
 
     deinit {

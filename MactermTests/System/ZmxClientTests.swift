@@ -71,6 +71,15 @@ struct ZmxSocketBudgetTests {
         let reason = ZmxSocketBudget.probe(env: ["ZMX_DIR": longDir])
         #expect(reason != nil)
     }
+
+    @Test
+    func socketPathJoinsDirAndSessionName() {
+        // The path `probe` budgets against, and the one `isSessionLive` stats.
+        #expect(
+            ZmxSocketBudget.socketPath(for: "macterm-a-1", env: ["ZMX_DIR": "/custom/dir"])
+                == "/custom/dir/macterm-a-1"
+        )
+    }
 }
 
 struct ZmxSessionNameTests {
@@ -194,6 +203,33 @@ struct ZmxAttachTests {
     func noExecutableYieldsEmptyArgv() {
         // nil executable (zmx unbundled or over budget) → no wrapper, plain shell.
         #expect(ZmxAttach.wrapperArgv(executablePath: nil, sessionID: "macterm-1").isEmpty)
+    }
+
+    @Test
+    func liveSessionIsDetectedFromItsSocket() {
+        var probed: [String] = []
+        let live = ZmxAttach.isSessionLive(
+            sessionName: "macterm-a-1",
+            env: ["ZMX_DIR": "/custom/dir"],
+            fileExists: { path in
+                probed.append(path)
+                return true
+            }
+        )
+        #expect(live)
+        // Must stat the session's own socket, not the dir.
+        #expect(probed == ["/custom/dir/macterm-a-1"])
+    }
+
+    @Test
+    func absentSocketMeansTheSessionWillBeCreated() {
+        // No socket → the daemon is gone (reboot, reap, terminate-on-quit), so
+        // the pane comes back empty and its saved scrollback is worth restoring.
+        #expect(!ZmxAttach.isSessionLive(
+            sessionName: "macterm-a-1",
+            env: ["ZMX_DIR": "/custom/dir"],
+            fileExists: { _ in false }
+        ))
     }
 }
 

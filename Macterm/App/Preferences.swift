@@ -286,6 +286,21 @@ final class Preferences {
         didSet { defaults.set(quickTerminalHeightFraction, forKey: Keys.quickTerminalHeight) }
     }
 
+    // MARK: - Scrollback
+
+    /// Save each pane's scrollback on quit/unload and replay recent context
+    /// (dimmed, closed by a labeled separator, above the fresh prompt) when the
+    /// pane is reopened. Defaults on. Applies to all panes and QuickTerminal.
+    var restoreScrollback: Bool {
+        didSet { defaults.set(restoreScrollback, forKey: Keys.restoreScrollback) }
+    }
+
+    /// How many trailing lines of scrollback to save and replay per pane. Bounds
+    /// both the on-disk file size and the restored context length.
+    var scrollbackRestoreLines: Int {
+        didSet { defaults.set(scrollbackRestoreLines, forKey: Keys.scrollbackRestoreLines) }
+    }
+
     // MARK: - Session
 
     /// Persisted so the app re-opens to the last-used project on launch.
@@ -349,6 +364,8 @@ final class Preferences {
         tabSwitcherVisibility = (defaults.string(forKey: Keys.tabSwitcherVisibility))
             .flatMap(TabSwitcherVisibility.init(rawValue:)) ?? .whenMultiple
         autoUpdatesEnabled = defaults.object(forKey: Keys.autoUpdatesEnabled) as? Bool ?? true
+        restoreScrollback = defaults.object(forKey: Keys.restoreScrollback) as? Bool ?? true
+        scrollbackRestoreLines = Self.clampLines(defaults.integer(forKey: Keys.scrollbackRestoreLines), fallback: 1000)
         Self.runOneTimeMigrations(defaults: defaults)
     }
 
@@ -364,6 +381,11 @@ final class Preferences {
     private static func clampScrollSpeed(_ v: Double, fallback: Double) -> Double {
         guard v > 0 else { return fallback }
         return max(0.25, min(3.0, v))
+    }
+
+    private static func clampLines(_ v: Int, fallback: Int) -> Int {
+        guard v > 0 else { return fallback }
+        return max(100, min(100_000, v))
     }
 
     /// Pre-v2 builds stored theme/font/option-as-alt in UserDefaults. Those
@@ -405,6 +427,8 @@ final class Preferences {
         static let terminateSessionsOnQuit = "macterm.session.terminateOnQuit"
         static let tabSwitcherVisibility = "macterm.toolbar.tabSwitcherVisibility"
         static let autoUpdatesEnabled = "macterm.autoUpdatesEnabled"
+        static let restoreScrollback = "macterm.scrollback.restore"
+        static let scrollbackRestoreLines = "macterm.scrollback.restoreLines"
         static let migrationV2GhosttyConfigOwned = "macterm.migration.v2_ghostty_config_owned"
     }
 }

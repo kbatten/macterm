@@ -502,6 +502,29 @@ final class AppState {
         workspaceStore.save(WorkspaceSerializer.snapshot(workspaces))
     }
 
+    // MARK: - Scrollback
+
+    /// Persist a live pane's scrollback (keyed on its stable `sessionID`) so a
+    /// reopened pane can replay recent context. No-op when the feature is off or
+    /// the surface has no content. Read from the live surface before it dies.
+    func saveScrollback(for pane: Pane) {
+        guard Preferences.shared.restoreScrollback,
+              let text = pane.nsView?.readScrollback(maxLines: Preferences.shared.scrollbackRestoreLines)
+        else { return }
+        writeScrollbackFile(text, for: pane.scrollbackRestoreID ?? pane.sessionID)
+    }
+
+    /// Save scrollback for every live pane across all workspaces. Called on app
+    /// termination so a relaunch restores each pane's recent context.
+    func saveAllScrollback() {
+        guard Preferences.shared.restoreScrollback else { return }
+        for ws in workspaces.values {
+            for pane in ws.tabs.flatMap({ $0.splitRoot.allPanes() }) {
+                saveScrollback(for: pane)
+            }
+        }
+    }
+
     // MARK: - Project
 
     func selectProject(_ project: Project) {
@@ -666,6 +689,9 @@ final class AppState {
         logger.debug("unloadProject: \(projectID, privacy: .public)")
         let snapshot = WorkspaceSerializer.snapshot([projectID: ws])
         for pane in ws.tabs.flatMap({ $0.splitRoot.allPanes() }) {
+            // Capture live scrollback first, while the surface still holds it;
+            // the restored pane (same sessionID) replays it on its next spawn.
+            saveScrollback(for: pane)
             // Unload KILLS: with quit now a detach, this is the one action
             // that stops a whole project's shells while keeping its layout
             // (the group-kill #113 asked for). A detaching unload would be
@@ -689,8 +715,10 @@ final class AppState {
         logger.debug("removeProject: \(projectID, privacy: .public)")
         if let ws = workspaces[projectID] {
             for pane in ws.tabs.flatMap({ $0.splitRoot.allPanes() }) {
-                // Project removed for good → its sessions die with it.
+                // Project removed for good → its sessions die with it, and any
+                // saved scrollback goes too so no orphan file lingers.
                 pane.killPersistentSession(using: zmx)
+                removeScrollbackFile(for: pane.sessionID)
                 pane.destroySurface()
             }
         }
@@ -854,8 +882,10 @@ final class AppState {
         else { return }
         logger.debug("closeTab: \(tabID, privacy: .public) project=\(projectID, privacy: .public)")
         for pane in tab.splitRoot.allPanes() {
-            // Tab closed for good → its panes' zmx sessions die with it.
+            // Tab closed for good → its panes' zmx sessions die with it, and
+            // their saved scrollback drops so no orphan file lingers.
             pane.killPersistentSession(using: zmx)
+            removeScrollbackFile(for: pane.sessionID)
             pane.destroySurface()
         }
         ws.closeTab(tabID)
@@ -1119,11 +1149,15 @@ final class AppState {
         // Pane closed for good → its zmx session dies with it. (The
         // onlyPaneLeft path below re-kills via closeTab; killSession is a
         // no-op on a missing session, so the overlap is harmless.)
-        tab.splitRoot.findPane(id: paneID)?.killPersistentSession(using: zmx)
+        let closedPane = tab.splitRoot.findPane(id: paneID)
+        let closedSessionID = closedPane?.sessionID
+        closedPane?.killPersistentSession(using: zmx)
         switch tab.removePane(paneID) {
         case .onlyPaneLeft:
+            // The last pane leaving routes through closeTab, which discards it.
             closeTab(tab.id, projectID: projectID)
         case .removed:
+            if let closedSessionID { removeScrollbackFile(for: closedSessionID) }
             saveWorkspaces()
         case .notFound:
             break

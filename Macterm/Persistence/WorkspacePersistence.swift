@@ -3,7 +3,10 @@ import os
 
 private let logger = Logger(subsystem: appBundleID, category: "WorkspacePersistence")
 
-private let quickTerminalPaneID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+/// Shared sentinel identity for all QuickTerminal panes: they merge one history
+/// file and one scrollback file across sessions (QuickTerminal is ephemeral and
+/// never workspace-persisted, so it can't key off a per-pane `histfileID`).
+let quickTerminalPaneID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
 
 // MARK: - Histfile storage helpers
 
@@ -168,6 +171,76 @@ func quickTerminalHistfileDirURL() -> String? {
         ensureZshenvIn(histfilePath: histfilePath, at: sub)
     }
     return sub.path
+}
+
+// MARK: - Scrollback storage helpers
+
+/// Derives the pane-specific scrollback file URL, reusing the same
+/// `pane_<paneID>/` directory as the histfile so all per-pane state lives in
+/// one place. Keyed on the pane's stable `histfileID` (not its volatile
+/// runtime `id`) so a restored pane re-binds to its own saved scrollback.
+@MainActor
+func deriveScrollbackPath(for paneID: UUID) -> URL? {
+    deriveHistfileDirPath(for: paneID)?.appendingPathComponent("scrollback", isDirectory: false)
+}
+
+/// Persists a pane's scrollback text to disk. Creates the pane directory if
+/// needed. Empty text removes any existing file (nothing worth restoring).
+@MainActor
+func writeScrollbackFile(_ text: String, for paneID: UUID) {
+    guard let url = deriveScrollbackPath(for: paneID) else { return }
+    if text.isEmpty {
+        removeScrollbackFile(for: paneID)
+        return
+    }
+    try? FileManager.default.createDirectory(
+        at: url.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+    )
+    do {
+        try text.write(to: url, atomically: true, encoding: .utf8)
+    } catch {
+        logger.error("writeScrollbackFile failed: \(error.localizedDescription, privacy: .public)")
+    }
+}
+
+/// Reads a pane's previously saved scrollback text, or nil if none exists.
+@MainActor
+func readScrollbackFile(for paneID: UUID) -> String? {
+    guard let url = deriveScrollbackPath(for: paneID),
+          FileManager.default.fileExists(atPath: url.path),
+          let text = try? String(contentsOf: url, encoding: .utf8),
+          !text.isEmpty
+    else { return nil }
+    return text
+}
+
+/// Deletes a pane's saved scrollback file (used after restoring it, and when a
+/// pane is permanently closed so no orphan file lingers).
+@MainActor
+func removeScrollbackFile(for paneID: UUID) {
+    guard let url = deriveScrollbackPath(for: paneID) else { return }
+    try? FileManager.default.removeItem(at: url)
+}
+
+/// The formatted banner to replay above a reopened pane's first prompt, or nil
+/// when there's nothing to restore. `skip` short-circuits the read for a spawn
+/// that reattaches a live session — zmx replays that session's own buffer, so
+/// restoring on top of it would show the same output twice.
+///
+/// Callers consume it (see `removeScrollbackFile`) so a surface recreation can't
+/// replay the same text twice; the next quit rewrites the file from the live
+/// buffer.
+@MainActor
+func restoreBannerToReplay(skip: Bool, for paneID: UUID?) -> String? {
+    guard Preferences.shared.restoreScrollback, !skip, let paneID,
+          let saved = readScrollbackFile(for: paneID)
+    else { return nil }
+    let banner = ScrollbackText.restoredBanner(
+        body: saved,
+        timestamp: ScrollbackText.timestamp(for: Date())
+    )
+    return banner.isEmpty ? nil : banner
 }
 
 // MARK: - File envelope
