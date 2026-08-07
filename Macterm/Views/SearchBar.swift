@@ -37,6 +37,20 @@ struct TerminalSearchBar: View {
                 .clipShape(RoundedRectangle(cornerRadius: 6))
                 .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(MactermTheme.border, lineWidth: 1))
 
+                Button(action: {
+                    searchState.isCaseSensitive.toggle()
+                    searchState.restartSearch()
+                }, label: {
+                    Text("Cc").font(.system(size: 10, weight: .semibold))
+                }).buttonStyle(SearchToggleButtonStyle(isSelected: searchState.isCaseSensitive))
+
+                Button(action: {
+                    searchState.isRegularExpression.toggle()
+                    searchState.restartSearch()
+                }, label: {
+                    Text(".*").font(.system(size: 10, weight: .semibold))
+                }).buttonStyle(SearchToggleButtonStyle(isSelected: searchState.isRegularExpression))
+
                 Button(action: onNavigatePrevious) {
                     Image(systemName: "chevron.up").font(.system(size: 10, weight: .semibold))
                 }.buttonStyle(SearchButtonStyle())
@@ -75,6 +89,19 @@ private struct SearchButtonStyle: ButtonStyle {
             .contentShape(Rectangle())
             .foregroundStyle(MactermTheme.fgMuted)
             .background(configuration.isPressed ? MactermTheme.surface : .clear)
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+    }
+}
+
+private struct SearchToggleButtonStyle: ButtonStyle {
+    let isSelected: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .frame(width: 32, height: 22)
+            .contentShape(Rectangle())
+            .foregroundStyle(isSelected ? MactermTheme.fg : MactermTheme.fgMuted)
+            .background(configuration.isPressed ? MactermTheme.surface : (isSelected ? MactermTheme.surface.opacity(0.5) : .clear))
             .clipShape(RoundedRectangle(cornerRadius: 4))
     }
 }

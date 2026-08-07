@@ -151,7 +151,14 @@ private struct TerminalSurface: NSViewRepresentable {
             }
             if let needle, !needle.isEmpty { pane.searchState.needle = needle }
             pane.searchState.isVisible = true
-            pane.searchState.startPublishing { [weak view] q in view?.sendSearchQuery(q) }
+            pane.searchState.startPublishing { [weak pane, weak view] q in
+                guard let view, let pane else { return }
+                view.sendSearchQuery(
+                    q,
+                    isCaseSensitive: pane.searchState.isCaseSensitive,
+                    isRegularExpression: pane.searchState.isRegularExpression
+                )
+            }
             if !pane.searchState.needle.isEmpty { pane.searchState.pushNeedle() }
         }
         view.onSearchEnd = { [weak pane] in

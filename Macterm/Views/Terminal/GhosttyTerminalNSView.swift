@@ -788,8 +788,23 @@ final class GhosttyTerminalNSView: NSView {
 
     // MARK: - Search
 
-    func sendSearchQuery(_ needle: String) {
+    func sendSearchQuery(_ needle: String, isCaseSensitive: Bool, isRegularExpression: Bool) {
         guard let surface else { return }
+
+        // Set search options
+        if isRegularExpression {
+            ghostty_surface_binding_action(surface, "search_regex:on", 15)
+        } else {
+            ghostty_surface_binding_action(surface, "search_regex:off", 16)
+        }
+
+        if isCaseSensitive {
+            ghostty_surface_binding_action(surface, "search_case:on", 14)
+        } else {
+            ghostty_surface_binding_action(surface, "search_case:off", 15)
+        }
+
+        // Send search query
         let action = "search:\(needle)"
         ghostty_surface_binding_action(surface, action, UInt(action.utf8.count))
     }

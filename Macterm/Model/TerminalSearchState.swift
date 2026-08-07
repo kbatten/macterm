@@ -7,6 +7,8 @@ final class TerminalSearchState {
     var total: Int?
     var selected: Int?
     var isVisible: Bool = false
+    var isCaseSensitive: Bool = true
+    var isRegularExpression: Bool = false
 
     var displayText: String {
         guard let total else { return "" }
@@ -33,6 +35,10 @@ final class TerminalSearchState {
     }
 
     func pushNeedle() {
+        subject.send(needle)
+    }
+
+    func restartSearch() {
         subject.send(needle)
     }
 
